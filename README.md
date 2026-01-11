@@ -2,6 +2,8 @@
 
 A macOS port of Lossless Scaling technology, bringing advanced upscaling and frame generation to any application running on your Mac.
 
+[ITS STILL IN ACTIVE DEVELOPMENT, IT MIGHT BE FULLY BROKEN AND OR WORKING AT THE TIME YOU DOWNLOAD.]
+
 ![macOS](https://img.shields.io/badge/macOS-15.0+-blue)
 ![Swift](https://img.shields.io/badge/Swift-5.9+-orange)
 ![Metal](https://img.shields.io/badge/Metal-3.0+-red)
