@@ -10,29 +10,22 @@ import QuartzCore
 @MainActor
 final class DirectRenderer: NSObject {
     
-    // MARK: - Properties
-    
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private let metalEngine: MetalEngine
     private var overlayManager: OverlayWindowManager?
     private var mtkView: MTKView?
     
-    // Screen Capture
     private var captureStream: SCStream?
     private var streamOutput: StreamOutput?
     private let captureQueue = DispatchQueue(label: "com.peachscaling.capture", qos: .userInteractive)
     
-    // Frame Management
-    private var currentFrameTexture: MTLTexture?
     private var displayTexture: MTLTexture?
     private let frameSemaphore = DispatchSemaphore(value: 3)
     
-    // Callbacks
     var onWindowLost: (() -> Void)?
     var onWindowMoved: ((CGRect) -> Void)?
     
-    // Statistics
     private(set) var currentFPS: Float = 0
     private(set) var interpolatedFPS: Float = 0
     private(set) var processingTime: Double = 0
@@ -40,17 +33,16 @@ final class DirectRenderer: NSObject {
     private var frameCount: UInt64 = 0
     private var interpolatedFrameCount: UInt64 = 0
     private var droppedFrames: UInt64 = 0
-    private var lastStatsUpdate: CFTimeInterval = 0
     private var fpsCounter: Int = 0
     private var fpsTimer: CFTimeInterval = 0
     
-    // Configuration
     private var currentSettings: CaptureSettings?
     private var targetWindowID: CGWindowID = 0
     private var targetPID: pid_t = 0
     private var isCapturing: Bool = false
     
-    // MARK: - Initialization
+    private var settingsUpdatePending = false
+    private var pendingConfig: (() -> Void)?
     
     init?(device: MTLDevice? = nil, commandQueue: MTLCommandQueue? = nil) {
         guard let dev = device ?? MTLCreateSystemDefaultDevice() else {
@@ -84,17 +76,39 @@ final class DirectRenderer: NSObject {
         NSLog("DirectRenderer: Initialized successfully with device: \(dev.name)")
     }
     
-    // MARK: - Configuration
-    
     func configure(
         from settings: CaptureSettings,
         targetFPS: Int = 120,
         sourceSize: CGSize? = nil,
         outputSize: CGSize? = nil
     ) {
+        if settingsUpdatePending {
+            pendingConfig = { [weak self] in
+                self?.performConfiguration(settings: settings, targetFPS: targetFPS, sourceSize: sourceSize, outputSize: outputSize)
+            }
+            return
+        }
+        
+        settingsUpdatePending = true
+        performConfiguration(settings: settings, targetFPS: targetFPS, sourceSize: sourceSize, outputSize: outputSize)
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.settingsUpdatePending = false
+            if let pending = self?.pendingConfig {
+                pending()
+                self?.pendingConfig = nil
+            }
+        }
+    }
+    
+    private func performConfiguration(
+        settings: CaptureSettings,
+        targetFPS: Int,
+        sourceSize: CGSize?,
+        outputSize: CGSize?
+    ) {
         self.currentSettings = settings
         
-        // Configure MetalFX scaler if upscaling is enabled
         if settings.isUpscalingEnabled, let source = sourceSize, let output = outputSize {
             metalEngine.configureScaler(
                 inputSize: source,
@@ -105,8 +119,6 @@ final class DirectRenderer: NSObject {
         
         NSLog("DirectRenderer: Configured - Upscale: \(settings.scalingType.rawValue), FrameGen: \(settings.frameGenMode.rawValue)")
     }
-    
-    // MARK: - Capture Control
     
     func startCapture(windowID: CGWindowID, pid: pid_t = 0) -> Bool {
         guard !isCapturing else {
@@ -135,7 +147,7 @@ final class DirectRenderer: NSObject {
                 let filter = SCContentFilter(desktopIndependentWindow: window)
                 
                 let config = SCStreamConfiguration()
-                config.width = Int(window.frame.width) * 2 // Retina
+                config.width = Int(window.frame.width) * 2
                 config.height = Int(window.frame.height) * 2
                 config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
                 config.pixelFormat = kCVPixelFormatType_32BGRA
@@ -190,7 +202,6 @@ final class DirectRenderer: NSObject {
     }
     
     func pauseCapture() {
-        // ScreenCaptureKit doesn't have explicit pause, so we stop processing
         isCapturing = false
     }
     
@@ -198,45 +209,42 @@ final class DirectRenderer: NSObject {
         isCapturing = true
     }
     
-    // MARK: - Frame Processing
-    
     private func processCapturedFrame(_ sampleBuffer: CMSampleBuffer) {
         guard isCapturing, sampleBuffer.isValid else { return }
         
-        autoreleasepool {
-            guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
-                  let settings = currentSettings else {
+        guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
+              let settings = currentSettings else {
+            return
+        }
+        
+        _ = frameSemaphore.wait(timeout: .now() + 0.016)
+        
+        metalEngine.processFrame(imageBuffer, settings: settings) { [weak self] processedTexture in
+            guard let self = self else {
+                self?.frameSemaphore.signal()
                 return
             }
             
-            frameSemaphore.wait()
-            
-            metalEngine.processFrame(imageBuffer, settings: settings) { [weak self] processedTexture in
-                guard let self = self else {
-                    self?.frameSemaphore.signal()
-                    return
-                }
-                
-                Task { @MainActor in
-                    if let texture = processedTexture {
-                        self.displayTexture = texture
-                        self.frameCount += 1
-                        
-                        if settings.isFrameGenEnabled {
-                            self.interpolatedFrameCount += 1
-                        }
-                        
-                        // Trigger view redraw
-                        self.mtkView?.setNeedsDisplay(self.mtkView?.bounds ?? .zero)
+            Task { @MainActor in
+                if let texture = processedTexture {
+                    self.displayTexture = texture
+                    self.frameCount += 1
+                    
+                    if settings.isFrameGenEnabled {
+                        self.interpolatedFrameCount += 1
                     }
                     
-                    self.frameSemaphore.signal()
+                    self.processingTime = self.metalEngine.processingTime
+                    
+                    self.mtkView?.setNeedsDisplay(self.mtkView?.bounds ?? .zero)
+                } else {
+                    self.droppedFrames += 1
                 }
+                
+                self.frameSemaphore.signal()
             }
         }
     }
-    
-    // MARK: - Window Management
     
     func attachToScreen(
         _ screen: NSScreen? = nil,
@@ -251,13 +259,16 @@ final class DirectRenderer: NSObject {
         
         let displaySize = size ?? targetScreen.frame.size
         
+        let vsyncEnabled = currentSettings?.vsync ?? true
+        let adaptiveSyncEnabled = currentSettings?.adaptiveSync ?? true
+        
         let config = OverlayWindowConfig(
             targetScreen: targetScreen,
             windowFrame: windowFrame,
             size: displaySize,
             refreshRate: 120.0,
-            vsyncEnabled: currentSettings?.vsync ?? true,
-            adaptiveSyncEnabled: currentSettings?.adaptiveSync ?? true,
+            vsyncEnabled: vsyncEnabled,
+            adaptiveSyncEnabled: adaptiveSyncEnabled,
             passThrough: true
         )
         
@@ -278,7 +289,7 @@ final class DirectRenderer: NSObject {
         view.delegate = self
         
         if let layer = view.layer as? CAMetalLayer {
-            layer.displaySyncEnabled = currentSettings?.vsync ?? true
+            layer.displaySyncEnabled = vsyncEnabled
             layer.presentsWithTransaction = false
             layer.wantsExtendedDynamicRangeContent = false
             layer.maximumDrawableCount = 3
@@ -311,12 +322,9 @@ final class DirectRenderer: NSObject {
         NSLog("DirectRenderer: Detached from window")
     }
     
-    // MARK: - Statistics
-    
     func getStats() -> DirectEngineStats {
         let now = CACurrentMediaTime()
         
-        // Update FPS calculation
         fpsCounter += 1
         if fpsTimer == 0 {
             fpsTimer = now
@@ -358,52 +366,32 @@ final class DirectRenderer: NSObject {
     }
 }
 
-// MARK: - MTKViewDelegate
-
 @available(macOS 15.0, *)
 extension DirectRenderer: MTKViewDelegate {
     
     nonisolated func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
-        // Handle drawable size changes if needed
     }
     
     nonisolated func draw(in view: MTKView) {
         Task { @MainActor in
-            autoreleasepool {
-                guard let texture = self.displayTexture,
-                      let commandBuffer = self.commandQueue.makeCommandBuffer(),
-                      let drawable = view.currentDrawable else {
-                    return
-                }
-                
-                commandBuffer.label = "DirectRenderer Display"
-                
-                let startTime = CACurrentMediaTime()
-                
-                // Render texture to drawable
-                _ = self.metalEngine.renderToDrawable(
-                    texture: texture,
-                    drawable: drawable,
-                    commandBuffer: commandBuffer
-                )
-                
-                commandBuffer.addCompletedHandler { [weak self] _ in
-                    Task { @MainActor in
-                        let endTime = CACurrentMediaTime()
-                        self?.processingTime = (endTime - startTime) * 1000.0
-                    }
-                }
-                
-                commandBuffer.commit()
-                
-                // Update window position if tracking a window
-                self.overlayManager?.updateWindowPosition()
+            guard let texture = self.displayTexture,
+                  let commandBuffer = self.commandQueue.makeCommandBuffer(),
+                  let drawable = view.currentDrawable else {
+                return
             }
+            
+            commandBuffer.label = "DirectRenderer Display"
+            
+            _ = self.metalEngine.renderToDrawable(
+                texture: texture,
+                drawable: drawable,
+                commandBuffer: commandBuffer
+            )
+            
+            commandBuffer.commit()
         }
     }
 }
-
-// MARK: - StreamOutput Helper
 
 @available(macOS 15.0, *)
 private class StreamOutput: NSObject, SCStreamOutput {
@@ -419,8 +407,6 @@ private class StreamOutput: NSObject, SCStreamOutput {
         handler(sampleBuffer)
     }
 }
-
-// MARK: - Stats Structure
 
 struct DirectEngineStats {
     var fps: Float
