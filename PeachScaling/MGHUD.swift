@@ -68,7 +68,7 @@ final class MGHUDData: ObservableObject {
     }
 }
 
-@available(macOS 26.0, *)
+@available(macOS 15.0, *)
 struct MGHUDView: View {
     @ObservedObject var data: MGHUDData
     let isCompact: Bool
@@ -209,7 +209,7 @@ struct MGHUDView: View {
     }
 }
 
-@available(macOS 26.0, *)
+@available(macOS 15.0, *)
 struct HUDRow: View {
     let label: String
     let value: String
@@ -229,7 +229,7 @@ struct HUDRow: View {
     }
 }
 
-@available(macOS 26.0, *)
+@available(macOS 15.0, *)
 class MGHUDOverlayView: NSView {
     private var hostingView: NSHostingView<MGHUDView>?
     private let hudData = MGHUDData()
@@ -288,7 +288,7 @@ class MGHUDOverlayView: NSView {
     }
 }
 
-@available(macOS 26.0, *)
+@available(macOS 15.0, *)
 @MainActor
 final class MGHUDWindowController {
     private var hudWindow: NSWindow?
