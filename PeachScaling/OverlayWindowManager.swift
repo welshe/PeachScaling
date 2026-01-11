@@ -45,6 +45,7 @@ final class OverlayWindowManager: ObservableObject {
     private var targetWindowID: CGWindowID = 0
     private var targetPID: pid_t = 0
     private var appObserver: Any?
+    private var windowUpdateTimer: Timer?
     
     init?(device: MTLDevice? = nil) {
         guard let dev = device ?? MTLCreateSystemDefaultDevice() else {
@@ -64,6 +65,7 @@ final class OverlayWindowManager: ObservableObject {
     }
     
     deinit {
+        windowUpdateTimer?.invalidate()
         if let observer = appObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
@@ -122,6 +124,9 @@ final class OverlayWindowManager: ObservableObject {
     }
     
     func destroyOverlay() {
+        windowUpdateTimer?.invalidate()
+        windowUpdateTimer = nil
+        
         if let observer = appObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
             appObserver = nil
@@ -165,6 +170,13 @@ final class OverlayWindowManager: ObservableObject {
     func setTargetWindow(_ windowID: CGWindowID, pid: pid_t) {
         targetWindowID = windowID
         targetPID = pid
+        
+        windowUpdateTimer?.invalidate()
+        windowUpdateTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.updateWindowPosition()
+            }
+        }
         
         if let observer = appObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
@@ -213,7 +225,8 @@ final class OverlayWindowManager: ObservableObject {
             height: bounds["Height"] ?? 100
         )
         
-        let screenH = NSScreen.main?.frame.height ?? 1080
+        guard let screen = window.screen ?? NSScreen.main else { return }
+        let screenH = screen.frame.height
         
         let nsFrame = CGRect(
             x: cgFrame.origin.x,
@@ -226,10 +239,14 @@ final class OverlayWindowManager: ObservableObject {
             window.orderFront(nil)
         }
         
-        if window.frame != nsFrame {
+        if abs(window.frame.origin.x - nsFrame.origin.x) > 1 ||
+           abs(window.frame.origin.y - nsFrame.origin.y) > 1 ||
+           abs(window.frame.size.width - nsFrame.size.width) > 1 ||
+           abs(window.frame.size.height - nsFrame.size.height) > 1 {
+            
             window.setFrame(nsFrame, display: false)
             
-            if let view = mtkView, let screen = window.screen ?? NSScreen.main {
+            if let view = mtkView {
                 view.frame = CGRect(origin: .zero, size: nsFrame.size)
                 view.drawableSize = CGSize(
                     width: nsFrame.width * screen.backingScaleFactor,
@@ -251,10 +268,7 @@ final class OverlayWindowManager: ObservableObject {
         if visible { overlayWindow?.orderFrontRegardless() }
         else { overlayWindow?.orderOut(nil) }
     }
-}
-
-@available(macOS 26.0, *)
-extension OverlayWindowManager {
+    
     func createTexture(
         width: Int, height: Int,
         pixelFormat: MTLPixelFormat = .rgba16Float,
