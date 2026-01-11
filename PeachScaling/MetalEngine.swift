@@ -2,10 +2,7 @@ import Metal
 import MetalKit
 import MetalFX
 import CoreVideo
-import Vision
 import Accelerate
-
-// MARK: - Constants & Structures
 
 struct InterpolationConstants {
     var interpolationFactor: Float
@@ -26,13 +23,10 @@ struct AAConstants {
 @available(macOS 15.0, *)
 class MetalEngine {
     
-    // MARK: - Properties
-    
     let device: MTLDevice
     let commandQueue: MTLCommandQueue
     private let textureCache: CVMetalTextureCache
     
-    // Compute Pipeline States
     private var interpolatePSO: MTLComputePipelineState?
     private var interpolateSimplePSO: MTLComputePipelineState?
     private var sharpenPSO: MTLComputePipelineState?
@@ -41,45 +35,24 @@ class MetalEngine {
     private var copyPSO: MTLComputePipelineState?
     private var motionEstimationPSO: MTLComputePipelineState?
     
-    // Render Pipeline State (for final display)
     private var renderPipelineState: MTLRenderPipelineState?
     private var samplerState: MTLSamplerState?
     
-    // MetalFX Scaler
     private var spatialScaler: MTLFXSpatialScaler?
     private var scalerInputSize: CGSize = .zero
     private var scalerOutputSize: CGSize = .zero
+    private var scalerColorMode: MTLFXSpatialScalerColorProcessingMode = .perceptual
     
-    // Texture Management
     private var previousTexture: MTLTexture?
-    private var currentTexture: MTLTexture?
     private var interpolatedTexture: MTLTexture?
     private var sharpenedTexture: MTLTexture?
     private var outputTexture: MTLTexture?
     private var motionTexture: MTLTexture?
     
-    // Vision-based Motion Estimation
-    private let sequenceHandler = VNSequenceRequestHandler()
-    private var lastPixelBuffer: CVPixelBuffer?
-    
-    // Frame History
-    private var frameHistory: [FrameData] = []
-    private let maxHistorySize = 4
-    
-    // Statistics
-    private(set) var currentFPS: Float = 0.0
     private(set) var processingTime: Double = 0.0
-    private var lastFrameTime: CFTimeInterval = 0
+    
     private var frameCount: Int = 0
     private var fpsUpdateTime: CFTimeInterval = 0
-    
-    struct FrameData {
-        let texture: MTLTexture
-        let timestamp: CFTimeInterval
-        let pixelBuffer: CVPixelBuffer?
-    }
-    
-    // MARK: - Initialization
     
     init?(device: MTLDevice? = nil) {
         guard let dev = device ?? MTLCreateSystemDefaultDevice() else {
@@ -109,15 +82,12 @@ class MetalEngine {
         NSLog("MetalEngine: Initialized successfully with device: \(dev.name)")
     }
     
-    // MARK: - Pipeline Setup
-    
     private func setupPipelines() {
         guard let library = device.makeDefaultLibrary() else {
             NSLog("MetalEngine: Failed to load default library")
             return
         }
         
-        // Compute Pipelines
         do {
             if let function = library.makeFunction(name: "interpolateFrames") {
                 interpolatePSO = try device.makeComputePipelineState(function: function)
@@ -152,7 +122,6 @@ class MetalEngine {
             NSLog("MetalEngine: Failed to create compute pipelines: \(error)")
         }
         
-        // Render Pipeline (for final display)
         do {
             guard let vertexFunc = library.makeFunction(name: "texture_vertex"),
                   let fragmentFunc = library.makeFunction(name: "texture_fragment") else {
@@ -183,8 +152,6 @@ class MetalEngine {
         samplerState = device.makeSamplerState(descriptor: samplerDesc)
     }
     
-    // MARK: - Scaler Configuration
-    
     func configureScaler(
         inputSize: CGSize,
         outputSize: CGSize,
@@ -196,8 +163,10 @@ class MetalEngine {
             return
         }
         
-        // Check if reconfiguration is needed
-        if scalerInputSize == inputSize && scalerOutputSize == outputSize && spatialScaler != nil {
+        if scalerInputSize == inputSize && 
+           scalerOutputSize == outputSize && 
+           scalerColorMode == colorProcessingMode &&
+           spatialScaler != nil {
             return
         }
         
@@ -218,8 +187,8 @@ class MetalEngine {
         spatialScaler = scaler
         scalerInputSize = inputSize
         scalerOutputSize = outputSize
+        scalerColorMode = colorProcessingMode
         
-        // Create output texture
         let outputDesc = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .bgra8Unorm,
             width: Int(outputSize.width),
@@ -233,106 +202,152 @@ class MetalEngine {
         NSLog("MetalEngine: Configured scaler - Input: \(Int(inputSize.width))x\(Int(inputSize.height)), Output: \(Int(outputSize.width))x\(Int(outputSize.height))")
     }
     
-    // MARK: - Frame Processing
-    
     func processFrame(
         _ imageBuffer: CVImageBuffer,
         settings: CaptureSettings,
         completion: @escaping (MTLTexture?) -> Void
     ) {
-        autoreleasepool {
-            guard let texture = makeTexture(from: imageBuffer) else {
-                NSLog("MetalEngine: Failed to create texture from image buffer")
-                completion(nil)
-                return
-            }
-            
-            guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-                NSLog("MetalEngine: Failed to create command buffer")
-                completion(nil)
-                return
-            }
-            commandBuffer.label = "MetalEngine Processing"
-            
-            let startTime = CACurrentMediaTime()
-            
-            // Store current frame in history
-            storeFrame(texture: texture, pixelBuffer: imageBuffer as? CVPixelBuffer, timestamp: startTime)
-            
-            var processedTexture = texture
-            
-            // Frame interpolation if enabled
-            if settings.isFrameGenEnabled, let previous = previousTexture {
-                if let interpolated = interpolateFrames(
-                    previous: previous,
-                    current: texture,
-                    t: 0.5,
-                    settings: settings,
-                    commandBuffer: commandBuffer
-                ) {
-                    processedTexture = interpolated
-                }
-            }
-            
-            // Apply anti-aliasing if enabled
-            if settings.aaMode != .off {
-                if let aaResult = applyAntiAliasing(
-                    processedTexture,
-                    mode: settings.aaMode,
-                    commandBuffer: commandBuffer
-                ) {
-                    processedTexture = aaResult
-                }
-            }
-            
-            // Upscaling
-            if settings.isUpscalingEnabled {
-                if let upscaled = upscale(
-                    processedTexture,
-                    settings: settings,
-                    commandBuffer: commandBuffer
-                ) {
-                    processedTexture = upscaled
-                }
-            }
-            
-            // Apply sharpening if needed
-            if settings.sharpening > 0.01 {
-                if let sharpened = applySharpen(
-                    processedTexture,
-                    intensity: settings.sharpening,
-                    commandBuffer: commandBuffer
-                ) {
-                    processedTexture = sharpened
-                }
-            }
-            
-            commandBuffer.addCompletedHandler { [weak self] buffer in
-                guard let self = self else { return }
-                let endTime = CACurrentMediaTime()
-                self.processingTime = (endTime - startTime) * 1000.0
-                self.updateFPS(timestamp: endTime)
-                completion(processedTexture)
-            }
-            
-            commandBuffer.commit()
-            
-            // Update previous frame
-            previousTexture = texture
+        guard let texture = makeTexture(from: imageBuffer) else {
+            NSLog("MetalEngine: Failed to create texture from image buffer")
+            completion(nil)
+            return
         }
+        
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            NSLog("MetalEngine: Failed to create command buffer")
+            completion(nil)
+            return
+        }
+        commandBuffer.label = "MetalEngine Processing"
+        
+        let startTime = CACurrentMediaTime()
+        
+        var processedTexture = texture
+        
+        if settings.isFrameGenEnabled, let previous = previousTexture {
+            if let motion = generateMotionVectors(
+                previous: previous,
+                current: texture,
+                commandBuffer: commandBuffer
+            ) {
+                motionTexture = motion
+            }
+            
+            if let interpolated = interpolateFrames(
+                previous: previous,
+                current: texture,
+                motionVectors: motionTexture,
+                t: 0.5,
+                settings: settings,
+                commandBuffer: commandBuffer
+            ) {
+                processedTexture = interpolated
+            }
+        }
+        
+        if settings.aaMode != .off {
+            if let aaResult = applyAntiAliasing(
+                processedTexture,
+                mode: settings.aaMode,
+                commandBuffer: commandBuffer
+            ) {
+                processedTexture = aaResult
+            }
+        }
+        
+        if settings.isUpscalingEnabled {
+            if let upscaled = upscale(
+                processedTexture,
+                settings: settings,
+                commandBuffer: commandBuffer
+            ) {
+                processedTexture = upscaled
+            }
+        }
+        
+        let needsSharpening = settings.sharpening > 0.01 && 
+                             (!settings.scalingType.usesMetalFX || 
+                              settings.qualityMode == .performance)
+        
+        if needsSharpening {
+            if let sharpened = applySharpen(
+                processedTexture,
+                intensity: settings.sharpening,
+                commandBuffer: commandBuffer
+            ) {
+                processedTexture = sharpened
+            }
+        }
+        
+        commandBuffer.addCompletedHandler { [weak self] buffer in
+            guard let self = self else { return }
+            let endTime = CACurrentMediaTime()
+            self.processingTime = (endTime - startTime) * 1000.0
+            completion(processedTexture)
+        }
+        
+        commandBuffer.commit()
+        
+        previousTexture = texture
     }
     
-    // MARK: - Frame Interpolation
+    private func generateMotionVectors(
+        previous: MTLTexture,
+        current: MTLTexture,
+        commandBuffer: MTLCommandBuffer
+    ) -> MTLTexture? {
+        guard let pso = motionEstimationPSO else { return nil }
+        
+        let motionWidth = current.width / 8
+        let motionHeight = current.height / 8
+        
+        if motionTexture == nil ||
+           motionTexture!.width != motionWidth ||
+           motionTexture!.height != motionHeight {
+            let desc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .rg16Float,
+                width: motionWidth,
+                height: motionHeight,
+                mipmapped: false
+            )
+            desc.usage = [.shaderWrite, .shaderRead]
+            desc.storageMode = .private
+            motionTexture = device.makeTexture(descriptor: desc)
+        }
+        
+        guard let outputTex = motionTexture,
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            return nil
+        }
+        
+        encoder.label = "Motion Estimation"
+        encoder.setComputePipelineState(pso)
+        encoder.setTexture(current, index: 0)
+        encoder.setTexture(previous, index: 1)
+        encoder.setTexture(outputTex, index: 2)
+        
+        let threadgroupSize = MTLSize(width: 8, height: 8, depth: 1)
+        let threadgroups = MTLSize(
+            width: (motionWidth + 7) / 8,
+            height: (motionHeight + 7) / 8,
+            depth: 1
+        )
+        
+        encoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadgroupSize)
+        encoder.endEncoding()
+        
+        return outputTex
+    }
     
     private func interpolateFrames(
         previous: MTLTexture,
         current: MTLTexture,
+        motionVectors: MTLTexture?,
         t: Float,
         settings: CaptureSettings,
         commandBuffer: MTLCommandBuffer
     ) -> MTLTexture? {
         
-        // Create interpolated texture if needed
         if interpolatedTexture == nil ||
            interpolatedTexture!.width != current.width ||
            interpolatedTexture!.height != current.height {
@@ -349,13 +364,42 @@ class MetalEngine {
         
         guard let outputTex = interpolatedTexture else { return nil }
         
-        // Use simple interpolation if motion vectors not available
+        if let motion = motionVectors, let pso = interpolatePSO,
+           let encoder = commandBuffer.makeComputeCommandEncoder() {
+            
+            encoder.label = "Frame Interpolation (Motion-Based)"
+            encoder.setComputePipelineState(pso)
+            encoder.setTexture(current, index: 0)
+            encoder.setTexture(previous, index: 1)
+            encoder.setTexture(motion, index: 2)
+            encoder.setTexture(outputTex, index: 3)
+            
+            var constants = InterpolationConstants(
+                interpolationFactor: t,
+                motionScale: settings.motionScale,
+                textureSize: SIMD2<Float>(Float(current.width), Float(current.height))
+            )
+            encoder.setBytes(&constants, length: MemoryLayout<InterpolationConstants>.size, index: 0)
+            
+            let threadgroupSize = MTLSize(width: 16, height: 16, depth: 1)
+            let threadgroups = MTLSize(
+                width: (current.width + 15) / 16,
+                height: (current.height + 15) / 16,
+                depth: 1
+            )
+            
+            encoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadgroupSize)
+            encoder.endEncoding()
+            
+            return outputTex
+        }
+        
         guard let pso = interpolateSimplePSO,
               let encoder = commandBuffer.makeComputeCommandEncoder() else {
             return nil
         }
         
-        encoder.label = "Frame Interpolation"
+        encoder.label = "Frame Interpolation (Simple)"
         encoder.setComputePipelineState(pso)
         encoder.setTexture(current, index: 0)
         encoder.setTexture(previous, index: 1)
@@ -376,8 +420,6 @@ class MetalEngine {
         
         return outputTex
     }
-    
-    // MARK: - Anti-Aliasing
     
     private func applyAntiAliasing(
         _ texture: MTLTexture,
@@ -423,8 +465,6 @@ class MetalEngine {
         return outputTex
     }
     
-    // MARK: - Upscaling
-    
     private func upscale(
         _ texture: MTLTexture,
         settings: CaptureSettings,
@@ -438,7 +478,6 @@ class MetalEngine {
             height: inputSize.height * scaleFactor
         )
         
-        // Use MetalFX for MGUP-1 modes
         if settings.scalingType.usesMetalFX {
             configureScaler(
                 inputSize: inputSize,
@@ -457,7 +496,6 @@ class MetalEngine {
             
             return output
         } else {
-            // Fallback to bilinear
             return fallbackUpscale(texture, outputSize: outputSize, commandBuffer: commandBuffer)
         }
     }
@@ -500,8 +538,6 @@ class MetalEngine {
         
         return outputTex
     }
-    
-    // MARK: - Sharpening
     
     private func applySharpen(
         _ texture: MTLTexture,
@@ -550,8 +586,6 @@ class MetalEngine {
         return outputTex
     }
     
-    // MARK: - Texture Creation
-    
     private func makeTexture(from imageBuffer: CVImageBuffer) -> MTLTexture? {
         let width = CVPixelBufferGetWidth(imageBuffer)
         let height = CVPixelBufferGetHeight(imageBuffer)
@@ -575,37 +609,6 @@ class MetalEngine {
         
         return CVMetalTextureGetTexture(cvTex)
     }
-    
-    // MARK: - Frame History Management
-    
-    private func storeFrame(texture: MTLTexture, pixelBuffer: CVPixelBuffer?, timestamp: CFTimeInterval) {
-        let frame = FrameData(texture: texture, timestamp: timestamp, pixelBuffer: pixelBuffer)
-        frameHistory.append(frame)
-        
-        if frameHistory.count > maxHistorySize {
-            frameHistory.removeFirst()
-        }
-    }
-    
-    // MARK: - FPS Tracking
-    
-    private func updateFPS(timestamp: CFTimeInterval) {
-        frameCount += 1
-        
-        if fpsUpdateTime == 0 {
-            fpsUpdateTime = timestamp
-            return
-        }
-        
-        let elapsed = timestamp - fpsUpdateTime
-        if elapsed >= 0.5 {
-            currentFPS = Float(frameCount) / Float(elapsed)
-            frameCount = 0
-            fpsUpdateTime = timestamp
-        }
-    }
-    
-    // MARK: - Render to Drawable
     
     func renderToDrawable(
         texture: MTLTexture,
@@ -640,16 +643,11 @@ class MetalEngine {
         return true
     }
     
-    // MARK: - Cleanup
-    
     func reset() {
         previousTexture = nil
-        currentTexture = nil
         interpolatedTexture = nil
         sharpenedTexture = nil
         motionTexture = nil
-        frameHistory.removeAll()
-        currentFPS = 0
         frameCount = 0
         fpsUpdateTime = 0
     }
