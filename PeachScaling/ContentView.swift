@@ -15,6 +15,7 @@ struct ContentView: View {
     @State private var countdown = 5
     @State private var isCountingDown = false
     @State private var isScalingActive = false
+    @State private var countdownTimer: Timer?
 
     @State private var directRenderer: DirectRenderer?
 
@@ -287,6 +288,7 @@ struct ContentView: View {
         .onDisappear {
             permTimer?.invalidate()
             statsTimer?.invalidate()
+            countdownTimer?.invalidate()
             if let monitor = hotkeyMonitor {
                 NSEvent.removeMonitor(monitor)
             }
@@ -294,29 +296,29 @@ struct ContentView: View {
                 NSEvent.removeMonitor(local)
             }
         }
-        .onChange(of: settings.vsync, initial: false) { _, _ in
+        .onChange(of: settings.vsync) {
             updateRendererConfig()
         }
-        .onChange(of: settings.scaleFactor, initial: false) { _, _ in
+        .onChange(of: settings.scaleFactor) {
             updateRendererConfig()
         }
-        .onChange(of: settings.scalingType, initial: false) { _, _ in
+        .onChange(of: settings.scalingType) {
             updateRendererConfig()
         }
-        .onChange(of: settings.frameGenMode, initial: false) { _, _ in
+        .onChange(of: settings.frameGenMode) {
             updateRendererConfig()
         }
-        .onChange(of: settings.aaMode, initial: false) { _, _ in
+        .onChange(of: settings.aaMode) {
             updateRendererConfig()
         }
-        .onChange(of: settings.renderScale, initial: false) { _, _ in
+        .onChange(of: settings.renderScale) {
             updateRendererConfig()
         }
-        .onChange(of: settings.sharpening, initial: false) { _, _ in
+        .onChange(of: settings.sharpening) {
             updateRendererConfig()
         }
-        .onChange(of: settings.showMGHUD, initial: false) { _, newValue in
-            if newValue && isScalingActive {
+        .onChange(of: settings.showMGHUD) {
+            if settings.showMGHUD && isScalingActive {
                 hudController.show(compact: false)
             } else {
                 hudController.hide()
@@ -427,10 +429,13 @@ struct ContentView: View {
     func startCountdown() {
         isCountingDown = true
         countdown = 5
-        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { timer in
-            if countdown > 1 { countdown -= 1 }
-            else {
+        countdownTimer?.invalidate()
+        countdownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [self] timer in
+            if countdown > 1 { 
+                countdown -= 1 
+            } else {
                 timer.invalidate()
+                countdownTimer = nil
                 isCountingDown = false
                 startDirectCapture()
             }
@@ -460,7 +465,8 @@ struct ContentView: View {
                            width: bounds["Width"] ?? 100,
                            height: bounds["Height"] ?? 100)
 
-        let screenH = NSScreen.main?.frame.height ?? 1080
+        guard let screen = NSScreen.main else { return }
+        let screenH = screen.frame.height
 
         let nsRect = CGRect(
             x: frame.origin.x,
@@ -480,7 +486,7 @@ struct ContentView: View {
 
         let outputFrame = resolvedDisplayFrame(for: nsRect)
         
-        let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+        let scale = screen.backingScaleFactor
         let userScale = CGFloat(settings.scaleFactor.floatValue)
         
         let sourceSize = nsRect.size
@@ -497,7 +503,7 @@ struct ContentView: View {
             outputSize: outputSize
         )
 
-        renderer.attachToScreen(NSScreen.main, size: sourceSize, windowFrame: nsRect)
+        renderer.attachToScreen(screen, size: sourceSize, windowFrame: nsRect)
 
         if renderer.startCapture(windowID: wid, pid: app.processIdentifier) {
             connectedProcessName = app.localizedName ?? "Unknown"
@@ -531,6 +537,8 @@ struct ContentView: View {
         directRenderer?.detachWindow()
         statsTimer?.invalidate()
         statsTimer = nil
+        countdownTimer?.invalidate()
+        countdownTimer = nil
         hudController.hide()
         isScalingActive = false
         currentFPS = 0.0
@@ -559,8 +567,6 @@ struct ContentView: View {
         return NSScreen.main?.frame ?? sourceFrame
     }
 }
-
-// MARK: - UI Components
 
 struct ConfigPanel<Content: View>: View {
     let title: String
