@@ -43,11 +43,14 @@ A macOS port of Lossless Scaling technology, bringing advanced upscaling and fra
 
 ## 📋 Requirements
 
-- **macOS**: 15.0 (Sequoia) or later
-- **GPU**: Apple Silicon (M1/M2/M3) or AMD GPU with Metal 3 support
-- **Permissions**: 
-  - Accessibility (for window tracking)
-  - Screen Recording (for capture)
+**macOS**: 15.0 (Sequoia) or later
+
+**GPU** (Minimum for MetalFX):
+- Apple Silicon: M1, M2, or M3 (any variant)
+- Intel: HD 5000+ with Metal support
+- AMD: GCN-based cards or newer with Metal 3
+**VRAM**: 4GB+ recommended for 4K+ upscaling
+**Display**: Supports up to 10x upscale ratio
 
 ---
 
