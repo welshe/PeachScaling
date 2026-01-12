@@ -81,26 +81,63 @@ kernel void estimateMotion(
     float2 texSize = float2(currentFrame.get_width(), currentFrame.get_height());
     float2 uv = (float2(gid) + 0.5) / float2(motionVectors.get_width(), motionVectors.get_height());
     
-    const int searchRadius = 4;
+    // Diamond Search (Optimized)
+    // 1. Center
+    // 2. Large Diamond (+/- 2)
+    // 3. Small Diamond (+/- 1) around best
     
-    // Center pixel for comparison
     float3 centerCurr = currentFrame.sample(s, uv).rgb;
     
     float2 bestMotion = float2(0.0);
     float bestError = 1e10;
     
-    for (int dy = -searchRadius; dy <= searchRadius; dy++) {
-        for (int dx = -searchRadius; dx <= searchRadius; dx++) {
-            float2 offset = float2(dx, dy) / texSize;
-            float2 testUV = uv + offset;
-            
-            float3 prev = previousFrame.sample(s, testUV).rgb;
-            float error = length(centerCurr - prev); // Simplified per-pixel error for speed
-            
-            if (error < bestError) {
-                bestError = error;
-                bestMotion = float2(dx, dy);
-            }
+    // checking (0,0)
+    {
+        float3 prev = previousFrame.sample(s, uv).rgb;
+        float error = length(centerCurr - prev);
+        bestError = error;
+    }
+    
+    // Large Diamond (Radius 2)
+    const float2 offsetsLarge[4] = {
+        float2(-2, 0), float2(2, 0), float2(0, -2), float2(0, 2)
+    };
+    
+    int bestLargeIdx = -1;
+    
+    for (int i = 0; i < 4; i++) {
+        float2 motion = offsetsLarge[i];
+        float2 testUV = uv + (motion / texSize);
+        float3 prev = previousFrame.sample(s, testUV).rgb;
+        float error = length(centerCurr - prev);
+        
+        if (error < bestError) {
+            bestError = error;
+            bestMotion = motion;
+            bestLargeIdx = i;
+        }
+    }
+    
+    // Small Diamond (Radius 1) around Best
+    // If best was (0,0), search +/- 1
+    // If best was offset, search neighbors?
+    // Simplified: Just search +/- 1 around current Best
+    
+    const float2 offsetsSmall[4] = {
+        float2(-1, 0), float2(1, 0), float2(0, -1), float2(0, 1)
+    };
+    
+    float2 centerSearch = bestMotion;
+    
+    for (int i = 0; i < 4; i++) {
+        float2 motion = centerSearch + offsetsSmall[i];
+        float2 testUV = uv + (motion / texSize);
+        float3 prev = previousFrame.sample(s, testUV).rgb;
+        float error = length(centerCurr - prev);
+        
+        if (error < bestError) {
+            bestError = error;
+            bestMotion = motion;
         }
     }
     
@@ -226,7 +263,7 @@ kernel void applyTAA(
     outputFrame.write(float4(result, 1.0), gid);
 }
 
-kernel void applySMAA(
+kernel void applyFastEdgeSmoothing(
     texture2d<float, access::sample> inputTexture [[texture(0)]],
     texture2d<float, access::write> outputTexture [[texture(1)]],
     constant AAConstants &constants [[buffer(0)]],
