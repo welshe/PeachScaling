@@ -16,7 +16,7 @@ A macOS port of Lossless Scaling technology, bringing advanced upscaling and fra
 
 ---
 
-## ✨ Features
+# ✨ Features
 
 ### Upscaling
 
