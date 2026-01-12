@@ -6,13 +6,10 @@ A macOS port of Lossless Scaling technology, bringing advanced upscaling and fra
     ⚠️ Active Development: This project is under active development and may be incomplete or unstable.
 
 
-macOS-15.0+-blue
- 
-Swift-5.9+-orange
- 
-Metal-3.0+-red
- 
-license-MIT-green
+![macOS](https://img.shields.io/badge/macOS-15.0+-blue) 
+![Swift](https://img.shields.io/badge/Swift-5.9+-orange) 
+![Metal](https://img.shields.io/badge/Metal-3.0+-red)
+ ![License](https://img.shields.io/badge/license-MIT-green)
 
 
 ✨ Features
