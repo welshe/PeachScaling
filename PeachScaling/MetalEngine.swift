@@ -149,8 +149,9 @@ final class MetalEngine {
         let maxTextureSize = device.supportsFamily(.apple3) ? 16384 : 8192
         guard Int(outputSize.width) <= maxTextureSize, Int(outputSize.height) <= maxTextureSize else { return }
         
-        // Avoid re-configuration if parameters match
-        if scalerInputSize == inputSize && scalerOutputSize == outputSize && scalerColorMode == colorProcessingMode && spatialScaler != nil {
+        // Check if existing scaler is still valid and parameters match
+        if let existingScaler = spatialScaler,
+           scalerInputSize == inputSize && scalerOutputSize == outputSize && scalerColorMode == colorProcessingMode {
             return
         }
         
@@ -163,7 +164,12 @@ final class MetalEngine {
         descriptor.outputTextureFormat = .bgra8Unorm
         descriptor.colorProcessingMode = colorProcessingMode
         
-        spatialScaler = descriptor.makeSpatialScaler(device: device)
+        guard let newScaler = descriptor.makeSpatialScaler(device: device) else {
+            NSLog("MetalEngine: Failed to create spatial scaler")
+            return
+        }
+        
+        spatialScaler = newScaler
         scalerInputSize = inputSize
         scalerOutputSize = outputSize
         scalerColorMode = colorProcessingMode
@@ -280,11 +286,16 @@ final class MetalEngine {
     func generateMotionVectors(previous: MTLTexture, current: MTLTexture, commandBuffer: MTLCommandBuffer) -> MTLTexture? {
         guard let pso = motionEstimationPSO else { return nil }
         
-        let width = current.width / 8
-        let height = current.height / 8
+        // Add bounds checking for motion texture creation
+        let width = max(1, current.width / 8)
+        let height = max(1, current.height / 8)
         
-        if motionTexture == nil || motionTexture?.width != width || motionTexture?.height != height {
-            let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rg16Float, width: width, height: height, mipmapped: false)
+        // Ensure minimum texture size
+        let finalWidth = min(width, device.maxTextureWidth)
+        let finalHeight = min(height, device.maxTextureHeight)
+        
+        if motionTexture == nil || motionTexture?.width != finalWidth || motionTexture?.height != finalHeight {
+            let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rg16Float, width: finalWidth, height: finalHeight, mipmapped: false)
             desc.usage = [.shaderWrite, .shaderRead]
             desc.storageMode = .private
             motionTexture = device.makeTexture(descriptor: desc)
@@ -297,7 +308,7 @@ final class MetalEngine {
         encoder.setTexture(previous, index: 1)
         encoder.setTexture(output, index: 2)
         
-        let threads = MTLSize(width: (width + 7) / 8, height: (height + 7) / 8, depth: 1)
+        let threads = MTLSize(width: (finalWidth + 7) / 8, height: (finalHeight + 7) / 8, depth: 1)
         encoder.dispatchThreadgroups(threads, threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
         encoder.endEncoding()
         
@@ -430,12 +441,14 @@ final class MetalEngine {
             configureScaler(inputSize: inputSize, outputSize: outputSize, colorProcessingMode: settings.qualityMode.scalerMode)
             
             guard let scaler = spatialScaler, let output = outputTexture else {
+                NSLog("MetalEngine: MetalFX scaler not available, falling back to bilinear")
                 return fallbackUpscale(texture, outputSize: outputSize, commandBuffer: commandBuffer)
             }
             
             scaler.colorTexture = texture
             scaler.outputTexture = output
             scaler.encode(commandBuffer: commandBuffer)
+            return output
         }
         
         return fallbackUpscale(texture, outputSize: outputSize, commandBuffer: commandBuffer)
@@ -517,6 +530,8 @@ final class MetalEngine {
         interpolatedTexture = nil
         sharpenedTexture = nil
         motionTexture = nil
+        spatialScaler = nil
+        outputTexture = nil
         frameCount = 0
         fpsUpdateTime = 0
     }
