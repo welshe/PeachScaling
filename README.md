@@ -185,53 +185,6 @@ Hotkeys
 Key	Action
 Cmd+Shift+T	Toggle scaling on/off
 
-Recommended Presets
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-Use Case	Upscaling	Scale	Frame Gen	Render Scale	AA	Sharpness
-Gaming (60→120 FPS)	MGUP-1 Quality	2.0x	Fixed 2x	67%	FXAA	0.5-0.7
-High Refresh (120Hz+)	MGUP-1 Fast	1.5x	Adaptive 144Hz	75%	Off	0.5
-Recording Quality	MGUP-1 Quality	2.0x-3.0x	Off	100%	TAA	0.7-0.9
 
 
 🏗️ Architecture
