@@ -92,4 +92,4 @@ A macOS port of Lossless Scaling technology, bringing advanced upscaling and fra
 
 ## 🏗️ Architecture
 
-PeachScaling is built entirely in **pure Swift** with **Metal** and **MetalFX**, eliminating the C++/Objective-C++ complexity of the original implementation.
+PeachScaling is built entirely in **pure Swift** with **Metal** and **MetalFX**
