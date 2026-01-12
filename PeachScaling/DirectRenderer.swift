@@ -217,13 +217,16 @@ final class DirectRenderer: NSObject {
             return
         }
         
-        _ = frameSemaphore.wait(timeout: .now() + 0.016)
+        guard case .success = frameSemaphore.wait(timeout: .now() + 0.016) else {
+            return
+        }
+        
+        let semaphore = frameSemaphore
         
         metalEngine.processFrame(imageBuffer, settings: settings) { [weak self] processedTexture in
-            guard let self = self else {
-                self?.frameSemaphore.signal()
-                return
-            }
+            defer { semaphore.signal() }
+            
+            guard let self = self else { return }
             
             Task { @MainActor in
                 if let texture = processedTexture {
@@ -240,8 +243,6 @@ final class DirectRenderer: NSObject {
                 } else {
                     self.droppedFrames += 1
                 }
-                
-                self.frameSemaphore.signal()
             }
         }
     }
@@ -373,10 +374,12 @@ extension DirectRenderer: MTKViewDelegate {
     }
     
     nonisolated func draw(in view: MTKView) {
-        Task { @MainActor in
-            guard let texture = self.displayTexture,
-                  let commandBuffer = self.commandQueue.makeCommandBuffer(),
-                  let drawable = view.currentDrawable else {
+        guard let drawable = view.currentDrawable else { return }
+        
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self,
+                  let texture = self.displayTexture,
+                  let commandBuffer = self.commandQueue.makeCommandBuffer() else {
                 return
             }
             
