@@ -1,10 +1,6 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// ============================================================================
-// MARK: - Data Structures
-// ============================================================================
-
 struct VertexOut {
     float4 position [[position]];
     float2 texCoord;
@@ -26,38 +22,32 @@ struct AAConstants {
     float subpixelBlend;
 };
 
-// ============================================================================
-// MARK: - Utility Functions
-// ============================================================================
+struct TAAConstants {
+    float modulation;
+    float2 textureSize;
+};
 
 float luminance(float3 color) {
     return dot(color, float3(0.299, 0.587, 0.114));
 }
 
-float2 getMotionVector(texture2d<float, access::sample> motionTexture, float2 uv, sampler s) {
-    if (is_null_texture(motionTexture)) {
-        return float2(0.0, 0.0);
-    }
-    return motionTexture.sample(s, uv).xy;
-}
-
 // ============================================================================
-// MARK: - Texture Display Shaders
+// MARK: - Vertex & Fragment Shaders
 // ============================================================================
 
 vertex VertexOut texture_vertex(uint vid [[vertex_id]]) {
     const float2 positions[4] = {
-        float2(-1.0, -1.0),  // bottom-left
-        float2( 1.0, -1.0),  // bottom-right
-        float2(-1.0,  1.0),  // top-left
-        float2( 1.0,  1.0)   // top-right
+        float2(-1.0, -1.0),
+        float2( 1.0, -1.0),
+        float2(-1.0,  1.0),
+        float2( 1.0,  1.0)
     };
     
     const float2 texCoords[4] = {
-        float2(0.0, 1.0),  // bottom-left
-        float2(1.0, 1.0),  // bottom-right
-        float2(0.0, 0.0),  // top-left
-        float2(1.0, 0.0)   // top-right
+        float2(0.0, 1.0),
+        float2(1.0, 1.0),
+        float2(0.0, 0.0),
+        float2(1.0, 0.0)
     };
     
     VertexOut out;
@@ -70,6 +60,51 @@ fragment float4 texture_fragment(VertexOut in [[stage_in]],
                                  texture2d<float> tex [[texture(0)]],
                                  sampler samp [[sampler(0)]]) {
     return tex.sample(samp, in.texCoord);
+}
+
+// ============================================================================
+// MARK: - Motion Estimation (Optimized O(N^2))
+// ============================================================================
+
+kernel void estimateMotion(
+    texture2d<float, access::sample> currentFrame [[texture(0)]],
+    texture2d<float, access::sample> previousFrame [[texture(1)]],
+    texture2d<float, access::write> motionVectors [[texture(2)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= motionVectors.get_width() || gid.y >= motionVectors.get_height()) {
+        return;
+    }
+    
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    
+    float2 texSize = float2(currentFrame.get_width(), currentFrame.get_height());
+    float2 uv = (float2(gid) + 0.5) / float2(motionVectors.get_width(), motionVectors.get_height());
+    
+    const int searchRadius = 4;
+    
+    // Center pixel for comparison
+    float3 centerCurr = currentFrame.sample(s, uv).rgb;
+    
+    float2 bestMotion = float2(0.0);
+    float bestError = 1e10;
+    
+    for (int dy = -searchRadius; dy <= searchRadius; dy++) {
+        for (int dx = -searchRadius; dx <= searchRadius; dx++) {
+            float2 offset = float2(dx, dy) / texSize;
+            float2 testUV = uv + offset;
+            
+            float3 prev = previousFrame.sample(s, testUV).rgb;
+            float error = length(centerCurr - prev); // Simplified per-pixel error for speed
+            
+            if (error < bestError) {
+                bestError = error;
+                bestMotion = float2(dx, dy);
+            }
+        }
+    }
+    
+    motionVectors.write(float4(bestMotion, 0.0, 1.0), gid);
 }
 
 // ============================================================================
@@ -111,7 +146,6 @@ kernel void interpolateFrames(
     outputFrame.write(result, gid);
 }
 
-// Simple blend interpolation (no motion vectors)
 kernel void interpolateSimple(
     texture2d<float, access::sample> currentFrame [[texture(0)]],
     texture2d<float, access::sample> previousFrame [[texture(1)]],
@@ -137,7 +171,155 @@ kernel void interpolateSimple(
 }
 
 // ============================================================================
-// MARK: - Contrast Adaptive Sharpening (CAS)
+// MARK: - Anti-Aliasing (TAA, SMAA, FXAA)
+// ============================================================================
+
+kernel void applyTAA(
+    texture2d<float, access::sample> currentFrame [[texture(0)]],
+    texture2d<float, access::sample> historyFrame [[texture(1)]],
+    texture2d<float, access::sample> motionVectors [[texture(2)]],
+    texture2d<float, access::write> outputFrame [[texture(3)]],
+    constant TAAConstants &constants [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= outputFrame.get_width() || gid.y >= outputFrame.get_height()) {
+        return;
+    }
+    
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    float2 texSize = constants.textureSize;
+    float2 uv = (float2(gid) + 0.5) / texSize;
+
+    float3 colorCurr = currentFrame.sample(s, uv).rgb;
+    
+    // Reproject history using motion vectors
+    float2 motion = float2(0.0);
+    if (!is_null_texture(motionVectors)) {
+        motion = motionVectors.sample(s, uv).xy;
+    }
+    
+    float2 historyUV = uv - (motion / texSize); // Motion is in pixels for us
+    
+    // Check bounds
+    if (historyUV.x < 0.0 || historyUV.x > 1.0 || historyUV.y < 0.0 || historyUV.y > 1.0) {
+        outputFrame.write(float4(colorCurr, 1.0), gid);
+        return;
+    }
+    
+    float3 colorHist = historyFrame.sample(s, historyUV).rgb;
+    
+    // Neighborhood Clamping (AAC)
+    float3 c00 = currentFrame.sample(s, uv + float2(-1, -1) / texSize).rgb;
+    float3 c10 = currentFrame.sample(s, uv + float2( 1, -1) / texSize).rgb;
+    float3 c01 = currentFrame.sample(s, uv + float2(-1,  1) / texSize).rgb;
+    float3 c11 = currentFrame.sample(s, uv + float2( 1,  1) / texSize).rgb;
+    
+    float3 minColor = min(min(min(c00, c10), min(c01, c11)), colorCurr);
+    float3 maxColor = max(max(max(c00, c10), max(c01, c11)), colorCurr);
+    
+    colorHist = clamp(colorHist, minColor, maxColor);
+    
+    // Temporal Blend
+    float modulation = constants.modulation;
+    float3 result = mix(colorHist, colorCurr, modulation);
+    
+    outputFrame.write(float4(result, 1.0), gid);
+}
+
+kernel void applySMAA(
+    texture2d<float, access::sample> inputTexture [[texture(0)]],
+    texture2d<float, access::write> outputTexture [[texture(1)]],
+    constant AAConstants &constants [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= outputTexture.get_width() || gid.y >= outputTexture.get_height()) {
+        return;
+    }
+    
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    float2 texSize = float2(inputTexture.get_width(), inputTexture.get_height());
+    float2 uv = (float2(gid) + 0.5) / texSize;
+    
+    float3 center = inputTexture.sample(s, uv).rgb;
+    float lumC = luminance(center);
+    
+    // Luma Edge Detection
+    float lumL = luminance(inputTexture.sample(s, uv + float2(-1.0, 0.0) / texSize).rgb);
+    float lumT = luminance(inputTexture.sample(s, uv + float2(0.0, -1.0) / texSize).rgb);
+    
+    float deltaX = abs(lumC - lumL);
+    float deltaY = abs(lumC - lumT);
+    
+    float maxDelta = max(deltaX, deltaY);
+    if (maxDelta < constants.threshold) {
+        outputTexture.write(float4(center, 1.0), gid);
+        return;
+    }
+    
+    // Simplified 1-pass blend (Edge-Directed Reconstruction)
+    float weights = 0.5;
+    float3 result = center;
+    
+    // If horizontal edge, blend vertical
+    if (deltaY > deltaX) {
+         result = mix(center, (inputTexture.sample(s, uv + float2(0.0, 1.0)/texSize).rgb + 
+                               inputTexture.sample(s, uv - float2(0.0, 1.0)/texSize).rgb) * 0.5, weights);
+    } else {
+         result = mix(center, (inputTexture.sample(s, uv + float2(1.0, 0.0)/texSize).rgb + 
+                               inputTexture.sample(s, uv - float2(1.0, 0.0)/texSize).rgb) * 0.5, weights);
+    }
+    
+    outputTexture.write(float4(result, 1.0), gid);
+}
+
+kernel void applyFXAA(
+    texture2d<float, access::sample> inputTexture [[texture(0)]],
+    texture2d<float, access::write> outputTexture [[texture(1)]],
+    constant AAConstants &constants [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= outputTexture.get_width() || gid.y >= outputTexture.get_height()) {
+        return;
+    }
+    
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    
+    float2 texSize = float2(inputTexture.get_width(), inputTexture.get_height());
+    float2 uv = (float2(gid) + 0.5) / texSize;
+    float2 texelSize = 1.0 / texSize;
+    
+    float3 rgbM = inputTexture.sample(s, uv).rgb;
+    
+    float lumM = luminance(rgbM);
+    
+    // Simple Luma Neighborhood
+    float lumNW = luminance(inputTexture.sample(s, uv + float2(-1, -1) * texelSize).rgb);
+    float lumNE = luminance(inputTexture.sample(s, uv + float2( 1, -1) * texelSize).rgb);
+    float lumSW = luminance(inputTexture.sample(s, uv + float2(-1,  1) * texelSize).rgb);
+    float lumSE = luminance(inputTexture.sample(s, uv + float2( 1,  1) * texelSize).rgb);
+    
+    float lumMin = min(lumM, min(min(lumNW, lumNE), min(lumSW, lumSE)));
+    float lumMax = max(lumM, max(max(lumNW, lumNE), max(lumSW, lumSE)));
+    float lumRange = lumMax - lumMin;
+    
+    if (lumRange < max(constants.threshold, lumMax * 0.125)) {
+        outputTexture.write(float4(rgbM, 1.0), gid);
+        return;
+    }
+    
+    float lumL = (lumNW + lumNE + lumSW + lumSE) * 0.25;
+    float rangeL = abs(lumL - lumM);
+    float blendL = max(0.0, (rangeL / lumRange) - 0.25) * (1.0 / 0.75);
+    blendL = min(blendL, constants.subpixelBlend);
+    
+    float3 rgbL = inputTexture.sample(s, uv + float2(0, blendL) * texelSize).rgb;
+    
+    float3 result = mix(rgbM, rgbL, blendL);
+    outputTexture.write(float4(result, 1.0), gid);
+}
+
+// ============================================================================
+// MARK: - Upscaling, Sharpening & Copy
 // ============================================================================
 
 kernel void contrastAdaptiveSharpening(
@@ -156,94 +338,23 @@ kernel void contrastAdaptiveSharpening(
     float2 uv = (float2(gid) + 0.5) / texSize;
     float2 texelSize = 1.0 / texSize;
     
-    // Sample 3x3 neighborhood
-    float3 a = inputTexture.sample(s, uv + float2(-1, -1) * texelSize).rgb;
-    float3 b = inputTexture.sample(s, uv + float2( 0, -1) * texelSize).rgb;
-    float3 c = inputTexture.sample(s, uv + float2( 1, -1) * texelSize).rgb;
-    float3 d = inputTexture.sample(s, uv + float2(-1,  0) * texelSize).rgb;
     float3 e = inputTexture.sample(s, uv).rgb;
+    float3 b = inputTexture.sample(s, uv + float2( 0, -1) * texelSize).rgb;
+    float3 d = inputTexture.sample(s, uv + float2(-1,  0) * texelSize).rgb;
     float3 f = inputTexture.sample(s, uv + float2( 1,  0) * texelSize).rgb;
-    float3 g = inputTexture.sample(s, uv + float2(-1,  1) * texelSize).rgb;
     float3 h = inputTexture.sample(s, uv + float2( 0,  1) * texelSize).rgb;
-    float3 i = inputTexture.sample(s, uv + float2( 1,  1) * texelSize).rgb;
     
-    // Compute min and max
-    float3 minRGB = min(min(min(d, e), min(f, b)), h);
-    float3 maxRGB = max(max(max(d, e), max(f, b)), h);
+    float3 minRGB = min(min(d, e), min(f, b));
+    float3 maxRGB = max(max(d, e), max(f, b));
     
-    // Compute local contrast
     float3 contrast = maxRGB - minRGB;
-    
-    // Compute directional filtering
     float3 amp = clamp(contrast * constants.sharpness, 0.0, 1.0);
     
-    // Apply sharpening
     float3 w = amp * -0.125;
     float3 result = saturate(e + (b + d + f + h) * w);
     
     outputTexture.write(float4(result, 1.0), gid);
 }
-
-// ============================================================================
-// MARK: - FXAA (Fast Approximate Anti-Aliasing)
-// ============================================================================
-
-kernel void applyFXAA(
-    texture2d<float, access::sample> inputTexture [[texture(0)]],
-    texture2d<float, access::write> outputTexture [[texture(1)]],
-    constant AAConstants &constants [[buffer(0)]],
-    uint2 gid [[thread_position_in_grid]])
-{
-    if (gid.x >= outputTexture.get_width() || gid.y >= outputTexture.get_height()) {
-        return;
-    }
-    
-    constexpr sampler s(address::clamp_to_edge, filter::linear);
-    
-    float2 texSize = float2(inputTexture.get_width(), inputTexture.get_height());
-    float2 uv = (float2(gid) + 0.5) / texSize;
-    float2 texelSize = 1.0 / texSize;
-    
-    // Sample center and 4-neighbors
-    float3 rgbM = inputTexture.sample(s, uv).rgb;
-    float3 rgbNW = inputTexture.sample(s, uv + float2(-1, -1) * texelSize).rgb;
-    float3 rgbNE = inputTexture.sample(s, uv + float2( 1, -1) * texelSize).rgb;
-    float3 rgbSW = inputTexture.sample(s, uv + float2(-1,  1) * texelSize).rgb;
-    float3 rgbSE = inputTexture.sample(s, uv + float2( 1,  1) * texelSize).rgb;
-    
-    // Convert to luminance
-    float lumM  = luminance(rgbM);
-    float lumNW = luminance(rgbNW);
-    float lumNE = luminance(rgbNE);
-    float lumSW = luminance(rgbSW);
-    float lumSE = luminance(rgbSE);
-    
-    float lumMin = min(lumM, min(min(lumNW, lumNE), min(lumSW, lumSE)));
-    float lumMax = max(lumM, max(max(lumNW, lumNE), max(lumSW, lumSE)));
-    float lumRange = lumMax - lumMin;
-    
-    // Early exit if contrast is too low
-    if (lumRange < max(constants.threshold, lumMax * 0.125)) {
-        outputTexture.write(float4(rgbM, 1.0), gid);
-        return;
-    }
-    
-    // Compute edge direction
-    float lumL = (lumNW + lumNE + lumSW + lumSE) * 0.25;
-    float rangeL = abs(lumL - lumM);
-    float blendL = max(0.0, (rangeL / lumRange) - 0.25) * (1.0 / 0.75);
-    blendL = min(blendL, constants.subpixelBlend);
-    
-    // Sample in the direction of the edge
-    float3 rgbL = inputTexture.sample(s, uv + float2(0, blendL) * texelSize).rgb;
-    
-    float3 result = mix(rgbM, rgbL, blendL);
-    outputTexture.write(float4(result, 1.0), gid);
-}
-
-// ============================================================================
-// MARK: - Simple Bilinear Upscale
-// ============================================================================
 
 kernel void bilinearUpscale(
     texture2d<float, access::sample> inputTexture [[texture(0)]],
@@ -263,10 +374,6 @@ kernel void bilinearUpscale(
     outputTexture.write(color, gid);
 }
 
-// ============================================================================
-// MARK: - Copy Texture
-// ============================================================================
-
 kernel void copyTexture(
     texture2d<float, access::read> inputTexture [[texture(0)]],
     texture2d<float, access::write> outputTexture [[texture(1)]],
@@ -278,58 +385,4 @@ kernel void copyTexture(
     
     float4 color = inputTexture.read(gid);
     outputTexture.write(color, gid);
-}
-
-// ============================================================================
-// MARK: - Motion Vector Estimation (Block Matching)
-// ============================================================================
-
-kernel void estimateMotion(
-    texture2d<float, access::sample> currentFrame [[texture(0)]],
-    texture2d<float, access::sample> previousFrame [[texture(1)]],
-    texture2d<float, access::write> motionVectors [[texture(2)]],
-    uint2 gid [[thread_position_in_grid]])
-{
-    if (gid.x >= motionVectors.get_width() || gid.y >= motionVectors.get_height()) {
-        return;
-    }
-    
-    constexpr sampler s(address::clamp_to_edge, filter::linear);
-    
-    float2 texSize = float2(currentFrame.get_width(), currentFrame.get_height());
-    float2 uv = (float2(gid) + 0.5) / float2(motionVectors.get_width(), motionVectors.get_height());
-    
-    const int searchRadius = 8;
-    const int blockSize = 4;
-    
-    float3 centerCurr = currentFrame.sample(s, uv).rgb;
-    
-    float2 bestMotion = float2(0.0);
-    float bestError = 1e10;
-    
-    // Search in previous frame
-    for (int dy = -searchRadius; dy <= searchRadius; dy++) {
-        for (int dx = -searchRadius; dx <= searchRadius; dx++) {
-            float2 offset = float2(dx, dy) / texSize;
-            float2 testUV = uv + offset;
-            
-            // Sample block and compute error
-            float error = 0.0;
-            for (int by = -blockSize; by <= blockSize; by++) {
-                for (int bx = -blockSize; bx <= blockSize; bx++) {
-                    float2 blockOffset = float2(bx, by) / texSize;
-                    float3 curr = currentFrame.sample(s, uv + blockOffset).rgb;
-                    float3 prev = previousFrame.sample(s, testUV + blockOffset).rgb;
-                    error += length(curr - prev);
-                }
-            }
-            
-            if (error < bestError) {
-                bestError = error;
-                bestMotion = float2(dx, dy);
-            }
-        }
-    }
-    
-    motionVectors.write(float4(bestMotion, 0.0, 1.0), gid);
 }
