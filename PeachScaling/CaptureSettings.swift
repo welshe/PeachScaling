@@ -158,7 +158,7 @@ final class CaptureSettings: ObservableObject {
              switch self {
              case .off: return "No anti-aliasing"
              case .fxaa: return "Fast Approximate AA"
-             case .smaa: return "Subpixel Morphological AA"
+             case .smaa: return "Fast Edge Smoothing"
              case .taa: return "Temporal AA (Anti-Ghosting)"
              }
         }
