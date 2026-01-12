@@ -47,6 +47,9 @@ final class DirectRenderer: NSObject {
     private var fpsCounter: Int = 0
     private var fpsTimer: CFTimeInterval = 0
     
+    private var lastReportedFrameCount: UInt64 = 0
+    private var lastReportedInterpCount: UInt64 = 0
+    
     private var currentSettings: CaptureSettings?
     private var targetWindowID: CGWindowID = 0
     private var targetPID: pid_t = 0
@@ -103,15 +106,24 @@ final class DirectRenderer: NSObject {
         
         // Setup DisplayLink
         if displayLink == nil {
-            var params = CVDisplayLinkCreateWithActiveCGDisplays(&displayLink)
-            if let link = displayLink {
-                let callback: CVDisplayLinkOutputCallback = { displayLink, inNow, inOutputTime, flagsIn, flagsOut, displayLinkContext in
-                    let renderer = Unmanaged<DirectRenderer>.fromOpaque(displayLinkContext!).takeUnretainedValue()
-                    renderer.renderLoopInternal()
-                    return kCVReturnSuccess
-                }
-                CVDisplayLinkSetOutputCallback(link, callback, Unmanaged.passUnretained(self).toOpaque())
+            var displayID = CGMainDisplayID()
+            if let screen = NSScreen.main {
+                displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? CGMainDisplayID()
             }
+            
+            let result = CVDisplayLinkCreateWithCGDisplay(displayID, &displayLink)
+            guard result == kCVReturnSuccess, let link = displayLink else {
+                NSLog("DirectRenderer: Failed to create display link")
+                onWindowLost?()
+                return false
+            }
+            
+            let callback: CVDisplayLinkOutputCallback = { displayLink, inNow, inOutputTime, flagsIn, flagsOut, displayLinkContext in
+                let renderer = Unmanaged<DirectRenderer>.fromOpaque(displayLinkContext!).takeUnretainedValue()
+                renderer.renderLoopInternal()
+                return kCVReturnSuccess
+            }
+            CVDisplayLinkSetOutputCallback(link, callback, Unmanaged.passUnretained(self).toOpaque())
         }
         
         Task {
@@ -146,7 +158,9 @@ final class DirectRenderer: NSObject {
                 CVDisplayLinkStart(displayLink!)
                 
             } catch {
+                NSLog("DirectRenderer: Stream capture failed: \(error)")
                 onWindowLost?()
+                return false
             }
         }
         
@@ -157,7 +171,11 @@ final class DirectRenderer: NSObject {
         guard isCapturing else { return }
         
         if let link = displayLink {
-             CVDisplayLinkStop(link)
+            var isRunning: CVReturn = 0
+            CVDisplayLinkIsRunning(link, &isRunning)
+            if isRunning == kCVReturnSuccess {
+                CVDisplayLinkStop(link)
+            }
         }
         
         Task {
@@ -187,8 +205,13 @@ final class DirectRenderer: NSObject {
         // 2. Enqueue
         queueLock.lock()
         frameQueue.append(CapturedFrame(texture: texture, timestamp: now))
-        // Prevent infinite growth if display hangs
-        if frameQueue.count > 5 { frameQueue.removeFirst() }
+        // Prevent infinite growth with proper overflow handling
+        let maxQueueSize = 5
+        if frameQueue.count > maxQueueSize {
+            let excessCount = frameQueue.count - maxQueueSize
+            frameQueue.removeFirst(excessCount)
+            droppedFrames += UInt64(excessCount)
+        }
         queueLock.unlock()
     }
     
@@ -292,6 +315,15 @@ final class DirectRenderer: NSObject {
         }
         
         commandBuffer.commit()
+        
+        // Check if display link is still running before starting it
+        if let link = displayLink {
+            var isRunning: CVReturn = 0
+            CVDisplayLinkIsRunning(link, &isRunning)
+            if isRunning != kCVReturnSuccess {
+                CVDisplayLinkStart(link)
+            }
+        }
     }
     
     func attachToScreen(_ screen: NSScreen? = nil, size: CGSize? = nil, windowFrame: CGRect? = nil) {
@@ -390,10 +422,6 @@ final class DirectRenderer: NSObject {
             aaMode: 0
         )
     }
-    
-    // Add missing properties for stats calculation
-    private var lastReportedFrameCount: UInt64 = 0
-    private var lastReportedInterpCount: UInt64 = 0
 }
 
 extension DirectRenderer: MTKViewDelegate {
