@@ -19,9 +19,20 @@ final class DirectRenderer: NSObject {
     private var captureStream: SCStream?
     private var streamOutput: StreamOutput?
     private let captureQueue = DispatchQueue(label: "com.peachscaling.capture", qos: .userInteractive)
+    private let renderQueue = DispatchQueue(label: "com.peachscaling.render", qos: .userInteractive)
     
-    private var displayTexture: MTLTexture?
-    private let frameSemaphore = DispatchSemaphore(value: 3)
+    private var displayLink: CVDisplayLink?
+    
+    struct CapturedFrame {
+        let texture: MTLTexture
+        let timestamp: CFTimeInterval
+    }
+    
+    private var frameQueue: [CapturedFrame] = []
+    private let queueLock = NSLock()
+    
+    private var lastDrawnFrame: MTLTexture?
+    private var interpolationPhase: Float = 0.0
     
     var onWindowLost: (() -> Void)?
     var onWindowMoved: ((CGRect) -> Void)?
@@ -90,6 +101,19 @@ final class DirectRenderer: NSObject {
         targetWindowID = windowID
         targetPID = pid
         
+        // Setup DisplayLink
+        if displayLink == nil {
+            var params = CVDisplayLinkCreateWithActiveCGDisplays(&displayLink)
+            if let link = displayLink {
+                let callback: CVDisplayLinkOutputCallback = { displayLink, inNow, inOutputTime, flagsIn, flagsOut, displayLinkContext in
+                    let renderer = Unmanaged<DirectRenderer>.fromOpaque(displayLinkContext!).takeUnretainedValue()
+                    renderer.renderLoopInternal()
+                    return kCVReturnSuccess
+                }
+                CVDisplayLinkSetOutputCallback(link, callback, Unmanaged.passUnretained(self).toOpaque())
+            }
+        }
+        
         Task {
             do {
                 let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
@@ -100,11 +124,11 @@ final class DirectRenderer: NSObject {
                 
                 let filter = SCContentFilter(desktopIndependentWindow: window)
                 let config = SCStreamConfiguration()
-                config.width = Int(window.frame.width) * 2
-                config.height = Int(window.frame.height) * 2
+                config.width = Int(window.frame.width)
+                config.height = Int(window.frame.height)
                 config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
                 config.pixelFormat = kCVPixelFormatType_32BGRA
-                config.queueDepth = 3
+                config.queueDepth = 5
                 config.showsCursor = currentSettings?.captureCursor ?? true
                 
                 let stream = SCStream(filter: filter, configuration: config, delegate: nil)
@@ -119,6 +143,8 @@ final class DirectRenderer: NSObject {
                 self.streamOutput = output
                 self.isCapturing = true
                 
+                CVDisplayLinkStart(displayLink!)
+                
             } catch {
                 onWindowLost?()
             }
@@ -130,51 +156,142 @@ final class DirectRenderer: NSObject {
     func stopCapture() {
         guard isCapturing else { return }
         
+        if let link = displayLink {
+             CVDisplayLinkStop(link)
+        }
+        
         Task {
             try? await captureStream?.stopCapture()
             self.captureStream = nil
             self.streamOutput = nil
             self.isCapturing = false
             self.metalEngine.reset()
+            
+            self.queueLock.lock()
+            self.frameQueue.removeAll()
+            self.queueLock.unlock()
         }
     }
     
-    func pauseCapture() {
-        isCapturing = false
-    }
-    
-    func resumeCapture() {
-        isCapturing = true
-    }
+    func pauseCapture() { isCapturing = false }
+    func resumeCapture() { isCapturing = true }
     
     private func processCapturedFrame(_ sampleBuffer: CMSampleBuffer) {
         guard isCapturing, sampleBuffer.isValid,
-              let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
-              frameSemaphore.wait(timeout: .now() + 0.016) == .success else { return }
+              let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         
-        // Settings access assumes safety or caching strategy
+        // 1. Convert to Texture immediately on capture queue
+        guard let texture = metalEngine.makeTexture(from: imageBuffer) else { return }
+        let now = CACurrentMediaTime()
         
-        Task { @MainActor in
-            guard let settings = self.currentSettings else {
-                self.frameSemaphore.signal()
-                return
-            }
-            
-            self.metalEngine.processFrame(imageBuffer, settings: settings) { [weak self] processedTexture in
-                defer { self?.frameSemaphore.signal() }
+        // 2. Enqueue
+        queueLock.lock()
+        frameQueue.append(CapturedFrame(texture: texture, timestamp: now))
+        // Prevent infinite growth if display hangs
+        if frameQueue.count > 5 { frameQueue.removeFirst() }
+        queueLock.unlock()
+    }
+    
+    // Called by CVDisplayLink on a background thread
+    private func renderLoopInternal() {
+        guard let settings = currentSettings else { return }
+        
+        // Determine what to render
+        var frameToRender: MTLTexture? = nil
+        var interpolationT: Float = 1.0
+        var previousFrame: MTLTexture? = nil
+        
+        queueLock.lock()
+        
+        if settings.isFrameGenEnabled {
+            // Needed: at least 2 frames to interpolate
+            if frameQueue.count >= 2 {
+                let frameA = frameQueue[0]
+                let frameB = frameQueue[1]
                 
-                guard let self = self, let texture = processedTexture else {
-                    self?.droppedFrames += 1
-                    return
+                // Advance phase
+                let step = 1.0 / Float(settings.frameGenMultiplier.intValue)
+                interpolationPhase += step
+                
+                // If phase exceeds 1.0, we move to next interval
+                if interpolationPhase >= 1.0 {
+                    interpolationPhase -= 1.0
+                    frameQueue.removeFirst()
+                    // Re-fetch new pair if available
+                    if frameQueue.count >= 2 {
+                        previousFrame = frameQueue[0].texture
+                        frameToRender = frameQueue[1].texture
+                    } else {
+                        // Ran out of future frames, just show current
+                        frameToRender = frameQueue.first?.texture
+                        previousFrame = nil
+                        interpolationT = 1.0
+                    }
+                } else {
+                    previousFrame = frameA.texture
+                    frameToRender = frameB.texture
                 }
+                interpolationT = interpolationPhase
                 
-                self.displayTexture = texture
-                self.frameCount += 1
-                if settings.isFrameGenEnabled { self.interpolatedFrameCount += 1 }
-                self.processingTime = self.metalEngine.processingTime
-                self.mtkView?.draw()
+            } else {
+                // Not enough frames, show latest or hold last
+                frameToRender = frameQueue.last?.texture ?? lastDrawnFrame
+                previousFrame = nil // No interpolation possible
+                interpolationT = 1.0
+            }
+        } else {
+            // No FG: Just drain queue and show latest
+            if !frameQueue.isEmpty {
+                frameToRender = frameQueue.last?.texture
+                frameQueue.removeAll()
+            } else {
+                frameToRender = lastDrawnFrame
+            }
+            interpolationT = 1.0
+        }
+        
+        queueLock.unlock()
+        
+        guard let target = frameToRender else { return }
+        lastDrawnFrame = target
+        
+        // 3. Process & Draw
+        // Use a semaphore to prevent backing up the GPU
+        // dispatch_semaphore_wait logic here could block the DisplayLink thread which is bad?
+        // Actually, CVDisplayLink drops frames if we block. That's fine.
+        
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else { return }
+        commandBuffer.label = "Render Loop"
+        
+        let startTime = CACurrentMediaTime()
+        
+        // Call MetalEngine to do the heavy lifting (Motion Est -> Interp -> AA -> Upscale)
+        let processed = metalEngine.processFrame(
+            current: target,
+            previous: previousFrame,
+            motionVectors: nil, // Engine handles caching/generating motion if needed
+            t: interpolationT,
+            settings: settings,
+            commandBuffer: commandBuffer
+        )
+        
+        // Draw to screen
+        if let finalTexture = processed, let view = mtkView, let drawable = view.currentDrawable {
+            if metalEngine.renderToDrawable(texture: finalTexture, drawable: drawable, commandBuffer: commandBuffer) {
+                // Stats
+                interpolatedFrameCount += 1 // This function runs at Display Rate (e.g. 120Hz)
+                if interpolationT >= 0.99 || interpolationT == 0.0 {
+                    // Start of a "Real" frame period
+                    frameCount += 1
+                }
             }
         }
+        
+        commandBuffer.addCompletedHandler { [weak self] _ in
+            self?.processingTime = (CACurrentMediaTime() - startTime) * 1000.0
+        }
+        
+        commandBuffer.commit()
     }
     
     func attachToScreen(_ screen: NSScreen? = nil, size: CGSize? = nil, windowFrame: CGRect? = nil) {
@@ -199,17 +316,13 @@ final class DirectRenderer: NSObject {
         view.framebufferOnly = true
         view.autoResizeDrawable = true
         view.layer?.isOpaque = false
-        view.enableSetNeedsDisplay = true
-        view.isPaused = false
-        view.preferredFramesPerSecond = 120
-        view.delegate = self
+        // Important: Manual drawing for DisplayLink
+        view.enableSetNeedsDisplay = false
+        view.isPaused = true 
         
         if let layer = view.layer as? CAMetalLayer {
             layer.displaySyncEnabled = currentSettings?.vsync ?? true
             layer.presentsWithTransaction = false
-            layer.wantsExtendedDynamicRangeContent = false
-            layer.maximumDrawableCount = 3
-            layer.allowsNextDrawableTimeout = true
             layer.pixelFormat = .bgra8Unorm
             layer.isOpaque = false
             layer.drawableSize = CGSize(width: displaySize.width * targetScreen.backingScaleFactor, height: displaySize.height * targetScreen.backingScaleFactor)
@@ -224,8 +337,7 @@ final class DirectRenderer: NSObject {
     }
     
     func detachWindow() {
-        mtkView?.isPaused = true
-        mtkView?.delegate = nil
+        if let link = displayLink { CVDisplayLinkStop(link) }
         mtkView = nil
         overlayManager?.destroyOverlay()
     }
@@ -237,16 +349,27 @@ final class DirectRenderer: NSObject {
         
         let elapsed = now - fpsTimer
         if elapsed >= 0.5 {
-            currentFPS = Float(fpsCounter) / Float(elapsed)
-            interpolatedFPS = currentSettings?.isFrameGenEnabled ?? false ? currentFPS * Float(currentSettings?.frameGenMultiplier.intValue ?? 1) : currentFPS
+            // Calculate real rates
+            let realFrameDelta = frameCount - lastReportedFrameCount
+            let interpFrameDelta = interpolatedFrameCount - lastReportedInterpCount
+            
+            // Avoid divide by zero
+            let safeElapsed = max(Float(elapsed), 0.001)
+            
+            currentFPS = Float(realFrameDelta) / safeElapsed
+            interpolatedFPS = Float(interpFrameDelta) / safeElapsed
+            
+            lastReportedFrameCount = frameCount
+            lastReportedInterpCount = interpolatedFrameCount
+            
             fpsCounter = 0
             fpsTimer = now
         }
         
         return DirectEngineStats(
-            fps: currentFPS,
+            fps: interpolatedFPS, // The Output FPS is the "Interpolated" rate (Display Rate)
             interpolatedFPS: interpolatedFPS,
-            captureFPS: currentFPS,
+            captureFPS: currentFPS, // The Input FPS
             frameTime: Float(processingTime),
             gpuTime: Float(processingTime * 0.8),
             captureLatency: Float(processingTime * 0.1),
@@ -267,24 +390,15 @@ final class DirectRenderer: NSObject {
             aaMode: 0
         )
     }
+    
+    // Add missing properties for stats calculation
+    private var lastReportedFrameCount: UInt64 = 0
+    private var lastReportedInterpCount: UInt64 = 0
 }
 
-@available(macOS 15.0, *)
 extension DirectRenderer: MTKViewDelegate {
     nonisolated func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
-    
-    nonisolated func draw(in view: MTKView) {
-        guard let drawable = view.currentDrawable else { return }
-        
-        Task { @MainActor in
-            guard let texture = self.displayTexture,
-                  let commandBuffer = self.commandQueue.makeCommandBuffer() else { return }
-            
-            commandBuffer.label = "DirectRenderer Display"
-            _ = self.metalEngine.renderToDrawable(texture: texture, drawable: drawable, commandBuffer: commandBuffer)
-            commandBuffer.commit()
-        }
-    }
+    nonisolated func draw(in view: MTKView) {} // Not used with explicit DisplayLink
 }
 
 @available(macOS 15.0, *)
