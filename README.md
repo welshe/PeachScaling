@@ -1,5 +1,7 @@
 ## Quick Links
-[Features](#-features) • [Requirements](#-requirements) • [Usage](#-usage) • [Troubleshooting](#-troubleshooting)
+
+[Features](#features) • [Requirements](#requirements) • [Usage](#usage) • [Troubleshooting](#troubleshooting)
+
 
 GPU-accelerated frame scaling and interpolation for macOS
 
