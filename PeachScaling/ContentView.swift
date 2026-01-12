@@ -426,7 +426,7 @@ struct ContentView: View {
         }
     }
 
-    func startCountdown() {
+    private func startCountdown() {
         isCountingDown = true
         countdown = 5
         countdownTimer?.invalidate()
@@ -441,8 +441,8 @@ struct ContentView: View {
             }
         }
     }
-
-    func startDirectCapture() {
+    
+    private func startDirectCapture() {
         guard let app = NSWorkspace.shared.frontmostApplication,
               app.processIdentifier != NSRunningApplication.current.processIdentifier else {
             alertMessage = "Please switch to the target window before the countdown ends."
@@ -529,6 +529,8 @@ struct ContentView: View {
             alertMessage = "Failed to start capture. Make sure you have Screen Recording permission."
             showAlert = true
             renderer.detachWindow()
+            // Restore activation policy on failure
+            NSApp.setActivationPolicy(.regular)
         }
     }
 
