@@ -45,20 +45,8 @@ final class DirectRenderer: NSObject {
     private var pendingConfig: (() -> Void)?
     
     init?(device: MTLDevice? = nil, commandQueue: MTLCommandQueue? = nil) {
-        guard let dev = device ?? MTLCreateSystemDefaultDevice() else {
-            NSLog("DirectRenderer: Failed to create Metal device")
-            return nil
-        }
-        
-        guard let queue = commandQueue ?? dev.makeCommandQueue() else {
-            NSLog("DirectRenderer: Failed to create command queue")
-            return nil
-        }
-        
-        guard let engine = MetalEngine(device: dev) else {
-            NSLog("DirectRenderer: Failed to create MetalEngine")
-            return nil
-        }
+        let dev = device ?? MTLCreateSystemDefaultDevice()
+        guard let dev, let queue = commandQueue ?? dev.makeCommandQueue(), let engine = MetalEngine(device: dev) else { return nil }
         
         self.device = dev
         self.commandQueue = queue
@@ -66,22 +54,11 @@ final class DirectRenderer: NSObject {
         
         super.init()
         
-        guard let overlay = OverlayWindowManager(device: dev) else {
-            NSLog("DirectRenderer: Failed to create OverlayWindowManager")
-            return nil
-        }
-        
+        guard let overlay = OverlayWindowManager(device: dev) else { return nil }
         self.overlayManager = overlay
-        
-        NSLog("DirectRenderer: Initialized successfully with device: \(dev.name)")
     }
     
-    func configure(
-        from settings: CaptureSettings,
-        targetFPS: Int = 120,
-        sourceSize: CGSize? = nil,
-        outputSize: CGSize? = nil
-    ) {
+    func configure(from settings: CaptureSettings, targetFPS: Int = 120, sourceSize: CGSize? = nil, outputSize: CGSize? = nil) {
         if settingsUpdatePending {
             pendingConfig = { [weak self] in
                 self?.performConfiguration(settings: settings, targetFPS: targetFPS, sourceSize: sourceSize, outputSize: outputSize)
@@ -93,59 +70,35 @@ final class DirectRenderer: NSObject {
         performConfiguration(settings: settings, targetFPS: targetFPS, sourceSize: sourceSize, outputSize: outputSize)
         
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            self?.settingsUpdatePending = false
-            if let pending = self?.pendingConfig {
-                pending()
-                self?.pendingConfig = nil
-            }
+            guard let self else { return }
+            self.settingsUpdatePending = false
+            self.pendingConfig?()
+            self.pendingConfig = nil
         }
     }
     
-    private func performConfiguration(
-        settings: CaptureSettings,
-        targetFPS: Int,
-        sourceSize: CGSize?,
-        outputSize: CGSize?
-    ) {
+    private func performConfiguration(settings: CaptureSettings, targetFPS: Int, sourceSize: CGSize?, outputSize: CGSize?) {
         self.currentSettings = settings
-        
         if settings.isUpscalingEnabled, let source = sourceSize, let output = outputSize {
-            metalEngine.configureScaler(
-                inputSize: source,
-                outputSize: output,
-                colorProcessingMode: settings.qualityMode.scalerMode
-            )
+            metalEngine.configureScaler(inputSize: source, outputSize: output, colorProcessingMode: settings.qualityMode.scalerMode)
         }
-        
-        NSLog("DirectRenderer: Configured - Upscale: \(settings.scalingType.rawValue), FrameGen: \(settings.frameGenMode.rawValue)")
     }
     
     func startCapture(windowID: CGWindowID, pid: pid_t = 0) -> Bool {
-        guard !isCapturing else {
-            NSLog("DirectRenderer: Already capturing")
-            return false
-        }
+        guard !isCapturing else { return false }
         
         targetWindowID = windowID
         targetPID = pid
         
         Task {
             do {
-                let content = try await SCShareableContent.excludingDesktopWindows(
-                    false,
-                    onScreenWindowsOnly: true
-                )
-                
+                let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
                 guard let window = content.windows.first(where: { $0.windowID == windowID }) else {
-                    NSLog("DirectRenderer: Window \(windowID) not found")
-                    await MainActor.run {
-                        onWindowLost?()
-                    }
+                    onWindowLost?()
                     return
                 }
                 
                 let filter = SCContentFilter(desktopIndependentWindow: window)
-                
                 let config = SCStreamConfiguration()
                 config.width = Int(window.frame.width) * 2
                 config.height = Int(window.frame.height) * 2
@@ -155,7 +108,6 @@ final class DirectRenderer: NSObject {
                 config.showsCursor = currentSettings?.captureCursor ?? true
                 
                 let stream = SCStream(filter: filter, configuration: config, delegate: nil)
-                
                 let output = StreamOutput { [weak self] sampleBuffer in
                     self?.processCapturedFrame(sampleBuffer)
                 }
@@ -163,18 +115,12 @@ final class DirectRenderer: NSObject {
                 try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: captureQueue)
                 try await stream.startCapture()
                 
-                await MainActor.run {
-                    self.captureStream = stream
-                    self.streamOutput = output
-                    self.isCapturing = true
-                    NSLog("DirectRenderer: Capture started for window \(windowID)")
-                }
+                self.captureStream = stream
+                self.streamOutput = output
+                self.isCapturing = true
                 
             } catch {
-                NSLog("DirectRenderer: Failed to start capture: \(error)")
-                await MainActor.run {
-                    onWindowLost?()
-                }
+                onWindowLost?()
             }
         }
         
@@ -185,19 +131,11 @@ final class DirectRenderer: NSObject {
         guard isCapturing else { return }
         
         Task {
-            do {
-                try await captureStream?.stopCapture()
-            } catch {
-                NSLog("DirectRenderer: Error stopping capture: \(error)")
-            }
-            
-            await MainActor.run {
-                self.captureStream = nil
-                self.streamOutput = nil
-                self.isCapturing = false
-                self.metalEngine.reset()
-                NSLog("DirectRenderer: Capture stopped")
-            }
+            try? await captureStream?.stopCapture()
+            self.captureStream = nil
+            self.streamOutput = nil
+            self.isCapturing = false
+            self.metalEngine.reset()
         }
     }
     
@@ -210,73 +148,50 @@ final class DirectRenderer: NSObject {
     }
     
     private func processCapturedFrame(_ sampleBuffer: CMSampleBuffer) {
-        guard isCapturing, sampleBuffer.isValid else { return }
+        guard isCapturing, sampleBuffer.isValid,
+              let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
+              frameSemaphore.wait(timeout: .now() + 0.016) == .success else { return }
         
-        guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
-              let settings = currentSettings else {
-            return
-        }
+        // Settings access assumes safety or caching strategy
         
-        guard case .success = frameSemaphore.wait(timeout: .now() + 0.016) else {
-            return
-        }
-        
-        let semaphore = frameSemaphore
-        
-        metalEngine.processFrame(imageBuffer, settings: settings) { [weak self] processedTexture in
-            defer { semaphore.signal() }
+        Task { @MainActor in
+            guard let settings = self.currentSettings else {
+                self.frameSemaphore.signal()
+                return
+            }
             
-            guard let self = self else { return }
-            
-            Task { @MainActor in
-                if let texture = processedTexture {
-                    self.displayTexture = texture
-                    self.frameCount += 1
-                    
-                    if settings.isFrameGenEnabled {
-                        self.interpolatedFrameCount += 1
-                    }
-                    
-                    self.processingTime = self.metalEngine.processingTime
-                    
-                    self.mtkView?.setNeedsDisplay(self.mtkView?.bounds ?? .zero)
-                } else {
-                    self.droppedFrames += 1
+            self.metalEngine.processFrame(imageBuffer, settings: settings) { [weak self] processedTexture in
+                defer { self?.frameSemaphore.signal() }
+                
+                guard let self = self, let texture = processedTexture else {
+                    self?.droppedFrames += 1
+                    return
                 }
+                
+                self.displayTexture = texture
+                self.frameCount += 1
+                if settings.isFrameGenEnabled { self.interpolatedFrameCount += 1 }
+                self.processingTime = self.metalEngine.processingTime
+                self.mtkView?.draw()
             }
         }
     }
     
-    func attachToScreen(
-        _ screen: NSScreen? = nil,
-        size: CGSize? = nil,
-        windowFrame: CGRect? = nil
-    ) {
-        let targetScreen = screen ?? NSScreen.main ?? NSScreen.screens.first
-        guard let targetScreen else {
-            NSLog("DirectRenderer: No screen available")
-            return
-        }
-        
+    func attachToScreen(_ screen: NSScreen? = nil, size: CGSize? = nil, windowFrame: CGRect? = nil) {
+        guard let targetScreen = screen ?? NSScreen.main ?? NSScreen.screens.first else { return }
         let displaySize = size ?? targetScreen.frame.size
-        
-        let vsyncEnabled = currentSettings?.vsync ?? true
-        let adaptiveSyncEnabled = currentSettings?.adaptiveSync ?? true
         
         let config = OverlayWindowConfig(
             targetScreen: targetScreen,
             windowFrame: windowFrame,
             size: displaySize,
             refreshRate: 120.0,
-            vsyncEnabled: vsyncEnabled,
-            adaptiveSyncEnabled: adaptiveSyncEnabled,
+            vsyncEnabled: currentSettings?.vsync ?? true,
+            adaptiveSyncEnabled: currentSettings?.adaptiveSync ?? true,
             passThrough: true
         )
         
-        guard let overlayManager, overlayManager.createOverlay(config: config) else {
-            NSLog("DirectRenderer: Failed to create overlay")
-            return
-        }
+        guard let overlayManager, overlayManager.createOverlay(config: config) else { return }
         
         let view = MTKView(frame: CGRect(origin: .zero, size: displaySize), device: device)
         view.clearColor = MTLClearColorMake(0, 0, 0, 0)
@@ -290,19 +205,14 @@ final class DirectRenderer: NSObject {
         view.delegate = self
         
         if let layer = view.layer as? CAMetalLayer {
-            layer.displaySyncEnabled = vsyncEnabled
+            layer.displaySyncEnabled = currentSettings?.vsync ?? true
             layer.presentsWithTransaction = false
             layer.wantsExtendedDynamicRangeContent = false
             layer.maximumDrawableCount = 3
             layer.allowsNextDrawableTimeout = true
             layer.pixelFormat = .bgra8Unorm
             layer.isOpaque = false
-            
-            let backingScale = targetScreen.backingScaleFactor
-            layer.drawableSize = CGSize(
-                width: displaySize.width * backingScale,
-                height: displaySize.height * backingScale
-            )
+            layer.drawableSize = CGSize(width: displaySize.width * targetScreen.backingScaleFactor, height: displaySize.height * targetScreen.backingScaleFactor)
         }
         
         overlayManager.setMTKView(view)
@@ -311,8 +221,6 @@ final class DirectRenderer: NSObject {
         if targetWindowID != 0 {
             overlayManager.setTargetWindow(targetWindowID, pid: targetPID)
         }
-        
-        NSLog("DirectRenderer: Attached to screen with size \(Int(displaySize.width))x\(Int(displaySize.height))")
     }
     
     func detachWindow() {
@@ -320,23 +228,17 @@ final class DirectRenderer: NSObject {
         mtkView?.delegate = nil
         mtkView = nil
         overlayManager?.destroyOverlay()
-        NSLog("DirectRenderer: Detached from window")
     }
     
     func getStats() -> DirectEngineStats {
         let now = CACurrentMediaTime()
-        
         fpsCounter += 1
-        if fpsTimer == 0 {
-            fpsTimer = now
-        }
+        if fpsTimer == 0 { fpsTimer = now }
         
         let elapsed = now - fpsTimer
         if elapsed >= 0.5 {
             currentFPS = Float(fpsCounter) / Float(elapsed)
-            interpolatedFPS = currentSettings?.isFrameGenEnabled ?? false
-                ? currentFPS * Float(currentSettings?.frameGenMultiplier.intValue ?? 1)
-                : currentFPS
+            interpolatedFPS = currentSettings?.isFrameGenEnabled ?? false ? currentFPS * Float(currentSettings?.frameGenMultiplier.intValue ?? 1) : currentFPS
             fpsCounter = 0
             fpsTimer = now
         }
@@ -369,28 +271,17 @@ final class DirectRenderer: NSObject {
 
 @available(macOS 15.0, *)
 extension DirectRenderer: MTKViewDelegate {
-    
-    nonisolated func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
-    }
+    nonisolated func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
     
     nonisolated func draw(in view: MTKView) {
         guard let drawable = view.currentDrawable else { return }
         
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self,
-                  let texture = self.displayTexture,
-                  let commandBuffer = self.commandQueue.makeCommandBuffer() else {
-                return
-            }
+        Task { @MainActor in
+            guard let texture = self.displayTexture,
+                  let commandBuffer = self.commandQueue.makeCommandBuffer() else { return }
             
             commandBuffer.label = "DirectRenderer Display"
-            
-            _ = self.metalEngine.renderToDrawable(
-                texture: texture,
-                drawable: drawable,
-                commandBuffer: commandBuffer
-            )
-            
+            _ = self.metalEngine.renderToDrawable(texture: texture, drawable: drawable, commandBuffer: commandBuffer)
             commandBuffer.commit()
         }
     }
