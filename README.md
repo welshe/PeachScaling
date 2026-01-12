@@ -1,3 +1,6 @@
+## Quick Links
+[Features](#-features) • [Requirements](#-requirements) • [Usage](#-usage) • [Troubleshooting](#-troubleshooting)
+
 GPU-accelerated frame scaling and interpolation for macOS
 
 A macOS port of Lossless Scaling technology, bringing advanced upscaling and frame generation to any application running on your Mac.
@@ -9,7 +12,6 @@ A macOS port of Lossless Scaling technology, bringing advanced upscaling and fra
 ![macOS](https://img.shields.io/badge/macOS-15.0+-blue) 
 ![Swift](https://img.shields.io/badge/Swift-5.9+-orange) 
 ![Metal](https://img.shields.io/badge/Metal-3.0+-red)
- ![License](https://img.shields.io/badge/license-MIT-green)
 
 
 ✨ Features
@@ -233,4 +235,4 @@ TAA ghosting
 
 📄 License
 
-MIT License - See LICENSE file for details
+![License](https://img.shields.io/badge/license-MIT-green)
