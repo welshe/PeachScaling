@@ -21,7 +21,7 @@ final class DirectRenderer: NSObject {
     private let captureQueue = DispatchQueue(label: "com.peachscaling.capture", qos: .userInteractive)
     private let renderQueue = DispatchQueue(label: "com.peachscaling.render", qos: .userInteractive)
     
-    private var displayLink: CVDisplayLink?
+    private var displayLink: CADisplayLink?
     
     struct CapturedFrame {
         let texture: MTLTexture
@@ -72,6 +72,10 @@ final class DirectRenderer: NSObject {
         self.overlayManager = overlay
     }
     
+    @objc private func displayLinkCallback(_ displayLink: CADisplayLink) {
+        renderLoopInternal()
+    }
+    
     func configure(from settings: CaptureSettings, targetFPS: Int = 120, sourceSize: CGSize? = nil, outputSize: CGSize? = nil) {
         if settingsUpdatePending {
             pendingConfig = { [weak self] in
@@ -106,24 +110,15 @@ final class DirectRenderer: NSObject {
         
         // Setup DisplayLink
         if displayLink == nil {
-            var displayID = CGMainDisplayID()
-            if let screen = NSScreen.main {
-                displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? CGMainDisplayID()
-            }
-            
-            let result = CVDisplayLinkCreateWithCGDisplay(displayID, &displayLink)
-            guard result == kCVReturnSuccess, let link = displayLink else {
-                NSLog("DirectRenderer: Failed to create display link")
+            guard let screen = NSScreen.main else {
+                NSLog("DirectRenderer: No screen available for display link")
                 onWindowLost?()
                 return false
             }
             
-            let callback: CVDisplayLinkOutputCallback = { displayLink, inNow, inOutputTime, flagsIn, flagsOut, displayLinkContext in
-                let renderer = Unmanaged<DirectRenderer>.fromOpaque(displayLinkContext!).takeUnretainedValue()
-                renderer.renderLoopInternal()
-                return kCVReturnSuccess
-            }
-            CVDisplayLinkSetOutputCallback(link, callback, Unmanaged.passUnretained(self).toOpaque())
+            displayLink = CADisplayLink(target: self, selector: #selector(displayLinkCallback))
+            displayLink?.preferredFramesPerSecond = 120
+            displayLink?.add(to: .main, forMode: .common)
         }
         
         Task {
@@ -155,8 +150,6 @@ final class DirectRenderer: NSObject {
                 self.streamOutput = output
                 self.isCapturing = true
                 
-                CVDisplayLinkStart(displayLink!)
-                
             } catch {
                 NSLog("DirectRenderer: Stream capture failed: \(error)")
                 onWindowLost?()
@@ -164,19 +157,19 @@ final class DirectRenderer: NSObject {
             }
         }
         
+        // Start the display link
+        displayLink?.isPaused = false
+        
         return true
     }
     
     func stopCapture() {
         guard isCapturing else { return }
         
-        if let link = displayLink {
-            var isRunning: CVReturn = 0
-            CVDisplayLinkIsRunning(link, &isRunning)
-            if isRunning == kCVReturnSuccess {
-                CVDisplayLinkStop(link)
-            }
-        }
+        // Pause and invalidate display link
+        displayLink?.isPaused = true
+        displayLink?.invalidate()
+        displayLink = nil
         
         Task {
             try? await captureStream?.stopCapture()
@@ -315,15 +308,6 @@ final class DirectRenderer: NSObject {
         }
         
         commandBuffer.commit()
-        
-        // Check if display link is still running before starting it
-        if let link = displayLink {
-            var isRunning: CVReturn = 0
-            CVDisplayLinkIsRunning(link, &isRunning)
-            if isRunning != kCVReturnSuccess {
-                CVDisplayLinkStart(link)
-            }
-        }
     }
     
     func attachToScreen(_ screen: NSScreen? = nil, size: CGSize? = nil, windowFrame: CGRect? = nil) {
@@ -369,7 +353,7 @@ final class DirectRenderer: NSObject {
     }
     
     func detachWindow() {
-        if let link = displayLink { CVDisplayLinkStop(link) }
+        displayLink?.isPaused = true
         mtkView = nil
         overlayManager?.destroyOverlay()
     }
