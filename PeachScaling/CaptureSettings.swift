@@ -230,9 +230,9 @@ final class CaptureSettings: ObservableObject {
     enum AAMode: String, CaseIterable, Identifiable {
         case off = "Off"
         case fxaa = "FXAA"
-        case smaa = "SMAA"
-        case msaa = "MSAA"
-        case taa = "TAA"
+        case smaa = "SMAA (Coming Soon)"
+        case msaa = "MSAA (Coming Soon)"
+        case taa = "TAA (Coming Soon)"
         
         var id: String { rawValue }
         
@@ -240,10 +240,14 @@ final class CaptureSettings: ObservableObject {
             switch self {
             case .off: return "No anti-aliasing - sharpest but aliased"
             case .fxaa: return "Fast Approximate AA - quick, slight blur"
-            case .smaa: return "Subpixel Morphological AA - high quality edges"
-            case .msaa: return "Multisample AA - hardware-like, clean edges"
-            case .taa: return "Temporal AA - motion-compensated, best quality"
+            case .smaa: return "Subpixel Morphological AA - not yet implemented"
+            case .msaa: return "Multisample AA - not yet implemented"
+            case .taa: return "Temporal AA - not yet implemented"
             }
+        }
+        
+        var isImplemented: Bool {
+            return self == .off || self == .fxaa
         }
         
         var isTemporal: Bool {
@@ -405,7 +409,8 @@ final class CaptureSettings: ObservableObject {
             vsync = defaults.bool(forKey: prefix + "vsync")
         }
         if defaults.object(forKey: prefix + "sharpening") != nil {
-            sharpening = defaults.float(forKey: prefix + "sharpening")
+            let loadedSharpening = defaults.float(forKey: prefix + "sharpening")
+            sharpening = max(0.0, min(1.0, loadedSharpening))
         }
         
         selectedProfile = name
