@@ -163,6 +163,13 @@ class MetalEngine {
             return
         }
         
+        let maxTextureSize = device.supportsFamily(.apple3) ? 16384 : 8192
+        guard Int(outputSize.width) <= maxTextureSize,
+              Int(outputSize.height) <= maxTextureSize else {
+            NSLog("MetalEngine: Output size \(Int(outputSize.width))x\(Int(outputSize.height)) exceeds GPU max texture size \(maxTextureSize)")
+            return
+        }
+        
         if scalerInputSize == inputSize && 
            scalerOutputSize == outputSize && 
            scalerColorMode == colorProcessingMode &&
