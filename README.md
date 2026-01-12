@@ -28,9 +28,8 @@ A macOS port of Lossless Scaling technology, bringing advanced upscaling and fra
 
 ### **Anti-Aliasing**
 - **FXAA**: Fast approximate anti-aliasing
-- **SMAA**: Subpixel morphological anti-aliasing (coming soon)
-- **MSAA**: Multisample anti-aliasing (coming soon)
-- **TAA**: Temporal anti-aliasing (coming soon)
+- **SMAA**: Subpixel morphological anti-aliasing
+- **TAA**: Temporal anti-aliasing
 
 ### **Additional Features**
 - Real-time HUD with performance metrics
