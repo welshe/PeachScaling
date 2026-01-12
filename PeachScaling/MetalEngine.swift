@@ -101,7 +101,7 @@ final class MetalEngine {
             ("interpolateSimple", \MetalEngine.interpolateSimplePSO),
             ("contrastAdaptiveSharpening", \MetalEngine.sharpenPSO),
             ("applyFXAA", \MetalEngine.fxaaPSO),
-            ("applySMAA", \MetalEngine.smaaPSO),
+            ("applyFastEdgeSmoothing", \MetalEngine.smaaPSO),
             ("applyTAA", \MetalEngine.taaPSO),
             ("bilinearUpscale", \MetalEngine.bilinearUpscalePSO),
             ("copyTexture", \MetalEngine.copyPSO),
@@ -174,54 +174,69 @@ final class MetalEngine {
         outputTexture = device.makeTexture(descriptor: outputDesc)
     }
     
-    func processFrame(_ imageBuffer: CVImageBuffer, settings: CaptureSettings, completion: @escaping (MTLTexture?) -> Void) {
-        guard let texture = makeTexture(from: imageBuffer),
-              let commandBuffer = commandQueue.makeCommandBuffer() else {
-            completion(nil)
-            return
+    func makeTexture(from imageBuffer: CVImageBuffer) -> MTLTexture? {
+        let width = CVPixelBufferGetWidth(imageBuffer)
+        let height = CVPixelBufferGetHeight(imageBuffer)
+        
+        var cvTexture: CVMetalTexture?
+        guard CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, textureCache, imageBuffer, nil, .bgra8Unorm, width, height, 0, &cvTexture) == kCVReturnSuccess,
+              let cvTex = cvTexture else { return nil }
+        
+        return CVMetalTextureGetTexture(cvTex)
+    }
+
+    /// Process a frame with full pipeline: Motion -> Interpolate (Optional) -> AA -> Upscale -> Sharpen
+    /// Now stateless regarding "previousTexture" to allow renderer to manage frame history
+    func processFrame(
+        current: MTLTexture,
+        previous: MTLTexture?,
+        motionVectors: MTLTexture?, // Pre-calculated or nil
+        t: Float, // Interpolation factor (0.0 = previous, 1.0 = current)
+        settings: CaptureSettings,
+        commandBuffer: MTLCommandBuffer
+    ) -> MTLTexture? {
+        
+        var processedTexture = current
+        var currentMotion = motionVectors
+        
+        // 1. Motion Estimation (if needed & not provided)
+        // We need motion vectors if TAA is on OR Frame Gen is on
+        let needsMotion = settings.isFrameGenEnabled || settings.aaMode == .taa
+        if needsMotion && currentMotion == nil, let prev = previous {
+            currentMotion = generateMotionVectors(previous: prev, current: current, commandBuffer: commandBuffer)
         }
         
-        commandBuffer.label = "Frame Processing"
-        let startTime = CACurrentMediaTime()
-        var processedTexture = texture
-        
-        // 1. Frame Generation
-        if settings.isFrameGenEnabled, let previous = previousTexture {
-            // Generate motion vectors regardless of TAA, as they are "free" here or needed for FG
-            if let motion = generateMotionVectors(previous: previous, current: texture, commandBuffer: commandBuffer) {
-                motionTexture = motion
-            }
-            
-            // Interpolate
-            if let interpolated = interpolateFrames(previous: previous, current: texture, motionVectors: motionTexture, t: 0.5, settings: settings, commandBuffer: commandBuffer) {
+        // 2. Frame Interpolation
+        if settings.isFrameGenEnabled, let prev = previous {
+            // If FG is on, we interpolate between Previous and Current using 't'
+            // NOTE: If t=1.0, we just show Current. If t=0.5, we show mix.
+            if let interpolated = interpolateFrames(
+                previous: prev, 
+                current: current, 
+                motionVectors: currentMotion, 
+                t: t, 
+                settings: settings, 
+                commandBuffer: commandBuffer
+            ) {
                 processedTexture = interpolated
             }
-        } else {
-             // Ensure motion vectors are cleared or generated if TAA needs them but FG is off?
-             // Ideally TAA works best with motion vectors.
-             // For strict correctness, if TAA is on but FG is off, we SHOULD still generate motion vectors.
-             if settings.aaMode == .taa, let previous = previousTexture {
-                  if let motion = generateMotionVectors(previous: previous, current: texture, commandBuffer: commandBuffer) {
-                      motionTexture = motion
-                  }
-             }
         }
         
-        // 2. Anti-Aliasing
+        // 3. Anti-Aliasing
         if settings.aaMode != .off {
-            if let result = applyAntiAliasing(processedTexture, mode: settings.aaMode, motionVectors: motionTexture, commandBuffer: commandBuffer) {
+           if let result = applyAntiAliasing(processedTexture, mode: settings.aaMode, motionVectors: currentMotion, commandBuffer: commandBuffer) {
                 processedTexture = result
             }
         }
         
-        // 3. Upscaling
+        // 4. Upscaling
         if settings.isUpscalingEnabled {
             if let upscaled = upscale(processedTexture, settings: settings, commandBuffer: commandBuffer) {
                 processedTexture = upscaled
             }
         }
         
-        // 4. Sharpening
+        // 5. Sharpening
         let needsSharpening = settings.sharpening > 0.01 && (!settings.scalingType.usesMetalFX || settings.qualityMode == .performance)
         if needsSharpening {
             if let sharpened = applySharpen(processedTexture, intensity: settings.sharpening, commandBuffer: commandBuffer) {
@@ -229,16 +244,40 @@ final class MetalEngine {
             }
         }
         
-        commandBuffer.addCompletedHandler { [weak self] _ in
-            self?.processingTime = (CACurrentMediaTime() - startTime) * 1000.0
-            completion(processedTexture)
-        }
-        
-        commandBuffer.commit()
-        previousTexture = texture
+        return processedTexture
+    }
+
+    // Legacy/Convenience wrapper for single-shot processing (if needed by other parts)
+    func processFrameSingle(
+        _ imageBuffer: CVImageBuffer,
+        settings: CaptureSettings,
+        completion: @escaping (MTLTexture?) -> Void
+    ) {
+         guard let texture = makeTexture(from: imageBuffer),
+               let commandBuffer = commandQueue.makeCommandBuffer() else {
+             completion(nil)
+             return
+         }
+         
+         // In single shot mode, we manage state internally again? 
+         // Or strictly deprecated. Let's keep a functional path for tests.
+         let result = processFrame(
+            current: texture,
+            previous: previousTexture,
+            motionVectors: nil,
+            t: 1.0,
+            settings: settings,
+            commandBuffer: commandBuffer
+         )
+         
+         previousTexture = texture
+         
+         commandBuffer.addCompletedHandler { _ in completion(result) }
+         commandBuffer.commit()
     }
     
-    private func generateMotionVectors(previous: MTLTexture, current: MTLTexture, commandBuffer: MTLCommandBuffer) -> MTLTexture? {
+    // Changed visibility to internal for DirectRenderer access
+    func generateMotionVectors(previous: MTLTexture, current: MTLTexture, commandBuffer: MTLCommandBuffer) -> MTLTexture? {
         guard let pso = motionEstimationPSO else { return nil }
         
         let width = current.width / 8
@@ -397,7 +436,6 @@ final class MetalEngine {
             scaler.colorTexture = texture
             scaler.outputTexture = output
             scaler.encode(commandBuffer: commandBuffer)
-            return output
         }
         
         return fallbackUpscale(texture, outputSize: outputSize, commandBuffer: commandBuffer)
@@ -449,16 +487,8 @@ final class MetalEngine {
         return output
     }
     
-    private func makeTexture(from imageBuffer: CVImageBuffer) -> MTLTexture? {
-        let width = CVPixelBufferGetWidth(imageBuffer)
-        let height = CVPixelBufferGetHeight(imageBuffer)
-        
-        var cvTexture: CVMetalTexture?
-        guard CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, textureCache, imageBuffer, nil, .bgra8Unorm, width, height, 0, &cvTexture) == kCVReturnSuccess,
-              let cvTex = cvTexture else { return nil }
-        
-        return CVMetalTextureGetTexture(cvTex)
-    }
+    // Moved makeTexture to public scope earlier
+
     
     func renderToDrawable(texture: MTLTexture, drawable: CAMetalDrawable, commandBuffer: MTLCommandBuffer) -> Bool {
         guard let pipelineState = renderPipelineState, let sampler = samplerState else { return false }
