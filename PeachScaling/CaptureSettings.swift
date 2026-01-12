@@ -1,7 +1,5 @@
-
 import SwiftUI
 import MetalFX
-
 
 @available(macOS 15.0, *)
 final class CaptureSettings: ObservableObject {
@@ -11,7 +9,7 @@ final class CaptureSettings: ObservableObject {
     @Published var profiles: [String] = ["Default", "Performance", "Quality", "Ultra"]
     
     enum RenderScale: String, CaseIterable, Identifiable {
-        case native = "Native (100%)"
+        case native = "Native"
         case p75 = "75%"
         case p67 = "67%"
         case p50 = "50%"
@@ -28,16 +26,6 @@ final class CaptureSettings: ObservableObject {
             case .p33: return 0.33
             }
         }
-        
-        var description: String {
-            switch self {
-            case .native: return "Full resolution capture - highest quality, highest GPU usage"
-            case .p75: return "75% resolution - slight quality loss, improved performance"
-            case .p67: return "67% resolution - good balance for MGUP-1"
-            case .p50: return "50% resolution - best for 2x upscaling"
-            case .p33: return "33% resolution - maximum performance, for 3x upscaling"
-            }
-        }
     }
     
     enum ScalingType: String, CaseIterable, Identifiable {
@@ -47,15 +35,6 @@ final class CaptureSettings: ObservableObject {
         case mgup1Quality = "MGUP-1 Quality"
         
         var id: String { rawValue }
-        
-        var description: String {
-            switch self {
-            case .off: return "No upscaling - original resolution passthrough"
-            case .mgup1: return "PeachScaling Upscaler - Balanced MetalFX AI upscaling"
-            case .mgup1Fast: return "PeachScaling Fast - Bilinear + Adaptive Sharpening"
-            case .mgup1Quality: return "PeachScaling Quality - MetalFX Spatial + CAS"
-            }
-        }
         
         var usesMetalFX: Bool {
             switch self {
@@ -77,14 +56,6 @@ final class CaptureSettings: ObservableObject {
             case .performance: return .linear
             case .balanced: return .perceptual
             case .ultra: return .hdr
-            }
-        }
-        
-        var description: String {
-            switch self {
-            case .performance: return "Linear processing - fastest, slight color shift"
-            case .balanced: return "Perceptual processing - best balance"
-            case .ultra: return "HDR processing - highest quality, wider gamut"
             }
         }
     }
@@ -117,23 +88,6 @@ final class CaptureSettings: ObservableObject {
             case .x10: return 10.0
             }
         }
-        
-        var supportsTemporalMode: Bool { floatValue <= 3.0 }
-        
-        var description: String {
-            switch self {
-            case .x1: return "1.0x - No upscale, passthrough"
-            case .x1_5: return "1.5x - Minimal upscale, best quality"
-            case .x2: return "2.0x - Standard upscale, recommended"
-            case .x2_5: return "2.5x - Good for 1080p→2.7K"
-            case .x3: return "3.0x - Good for 720p→2160p"
-            case .x4: return "4.0x - Maximum for MetalFX Temporal"
-            case .x5: return "5.0x - High upscale ratio"
-            case .x6: return "6.0x - Very high ratio"
-            case .x8: return "8.0x - Extreme upscale"
-            case .x10: return "10.0x - Maximum ratio, requires powerful GPU"
-            }
-        }
     }
     
     enum FrameGenMode: String, CaseIterable, Identifiable {
@@ -141,13 +95,6 @@ final class CaptureSettings: ObservableObject {
         case mgfg1 = "MGFG-1"
         
         var id: String { rawValue }
-        
-        var description: String {
-            switch self {
-            case .off: return "No frame generation - lowest latency"
-            case .mgfg1: return "PeachScaling Frame Generation - Optical flow interpolation"
-            }
-        }
     }
     
     enum FrameGenType: String, CaseIterable, Identifiable {
@@ -155,13 +102,6 @@ final class CaptureSettings: ObservableObject {
         case fixed = "Fixed"
         
         var id: String { rawValue }
-        
-        var description: String {
-            switch self {
-            case .adaptive: return "Auto-adjust to reach target FPS"
-            case .fixed: return "Fixed frame multiplication ratio"
-            }
-        }
     }
     
     enum TargetFPS: String, CaseIterable, Identifiable {
@@ -188,25 +128,12 @@ final class CaptureSettings: ObservableObject {
             case .fps360: return 360
             }
         }
-        
-        var description: String {
-            switch self {
-            case .fps60: return "60 FPS - Standard smooth"
-            case .fps90: return "90 FPS - VR/High refresh"
-            case .fps120: return "120 FPS - High refresh displays"
-            case .fps144: return "144 FPS - Gaming monitors"
-            case .fps165: return "165 FPS - Premium gaming"
-            case .fps180: return "180 FPS - Ultra high refresh"
-            case .fps240: return "240 FPS - Competitive/Pro"
-            case .fps360: return "360 FPS - Extreme/Esports"
-            }
-        }
     }
     
     enum FrameGenMultiplier: String, CaseIterable, Identifiable {
-        case x2 = "2x (Double FPS)"
-        case x3 = "3x (Triple FPS)"
-        case x4 = "4x (Quadruple FPS)"
+        case x2 = "2x"
+        case x3 = "3x"
+        case x4 = "4x"
         
         var id: String { rawValue }
         
@@ -217,90 +144,56 @@ final class CaptureSettings: ObservableObject {
             case .x4: return 4
             }
         }
-        
-        var description: String {
-            switch self {
-            case .x2: return "30→60 or 60→120 FPS"
-            case .x3: return "30→90 or 40→120 FPS"
-            case .x4: return "30→120 or 60→240 FPS"
-            }
-        }
     }
     
     enum AAMode: String, CaseIterable, Identifiable {
         case off = "Off"
         case fxaa = "FXAA"
-        case smaa = "SMAA (Coming Soon)"
-        case msaa = "MSAA (Coming Soon)"
-        case taa = "TAA (Coming Soon)"
+        case smaa = "SMAA"
+        case taa = "TAA"
         
         var id: String { rawValue }
         
         var description: String {
-            switch self {
-            case .off: return "No anti-aliasing - sharpest but aliased"
-            case .fxaa: return "Fast Approximate AA - quick, slight blur"
-            case .smaa: return "Subpixel Morphological AA - not yet implemented"
-            case .msaa: return "Multisample AA - not yet implemented"
-            case .taa: return "Temporal AA - not yet implemented"
-            }
+             switch self {
+             case .off: return "No anti-aliasing"
+             case .fxaa: return "Fast Approximate AA"
+             case .smaa: return "Subpixel Morphological AA"
+             case .taa: return "Temporal AA (Anti-Ghosting)"
+             }
         }
         
         var isImplemented: Bool {
-            return self == .off || self == .fxaa
-        }
-        
-        var isTemporal: Bool {
-            return self == .taa
+            return true
         }
     }
     
-    
     @Published var renderScale: RenderScale = .native
-    
     @Published var scalingType: ScalingType = .off
     @Published var qualityMode: QualityMode = .ultra
     @Published var scaleFactor: ScaleFactorOption = .x1
-    
     @Published var frameGenMode: FrameGenMode = .off
     @Published var frameGenType: FrameGenType = .adaptive
     @Published var targetFPS: TargetFPS = .fps120
     @Published var frameGenMultiplier: FrameGenMultiplier = .x2
-    
     @Published var aaMode: AAMode = .off
-    
     @Published var captureCursor: Bool = true
     @Published var reduceLatency: Bool = true
     @Published var adaptiveSync: Bool = true
     @Published var showMGHUD: Bool = true
     @Published var vsync: Bool = true
-    
     @Published var sharpening: Float = 0.5
     @Published var temporalBlend: Float = 0.1
     @Published var motionScale: Float = 1.0
-    
     
     var effectiveUpscaleFactor: Float {
         guard scalingType != .off else { return 1.0 }
         return scaleFactor.floatValue / renderScale.multiplier
     }
     
-    var isUpscalingEnabled: Bool {
-        return scalingType != .off
-    }
-    
-    var isFrameGenEnabled: Bool {
-        return frameGenMode != .off
-    }
-    
-    var isTemporalAAEnabled: Bool {
-        return aaMode == .taa
-    }
-    
-    var outputMultiplier: Float {
-        guard isUpscalingEnabled else { return 1.0 }
-        return scaleFactor.floatValue
-    }
+    var isUpscalingEnabled: Bool { scalingType != .off }
+    var isFrameGenEnabled: Bool { frameGenMode != .off }
+    var outputMultiplier: Float { isUpscalingEnabled ? scaleFactor.floatValue : 1.0 }
     
     var interpolatedFrameCount: Int {
         guard isFrameGenEnabled else { return 1 }
@@ -310,21 +203,16 @@ final class CaptureSettings: ObservableObject {
     var effectiveTargetFPS: Int {
         guard isFrameGenEnabled else { return 60 }
         switch frameGenType {
-        case .adaptive:
-            return targetFPS.intValue
-        case .fixed:
-            return 60 * frameGenMultiplier.intValue
+        case .adaptive: return targetFPS.intValue
+        case .fixed: return 60 * frameGenMultiplier.intValue
         }
     }
     
     func calculateAdaptiveMultiplier(sourceFPS: Float) -> Int {
-        guard frameGenType == .adaptive, sourceFPS > 0 else {
-            return frameGenMultiplier.intValue
-        }
+        guard frameGenType == .adaptive, sourceFPS > 0 else { return frameGenMultiplier.intValue }
         let needed = Float(targetFPS.intValue) / sourceFPS
         return max(1, min(4, Int(ceil(needed))))
     }
-    
     
     func saveProfile(_ name: String) {
         let defaults = UserDefaults.standard
@@ -356,61 +244,23 @@ final class CaptureSettings: ObservableObject {
         let defaults = UserDefaults.standard
         let prefix = "PeachScaling.Profile.\(name)."
         
-        if let rs = defaults.string(forKey: prefix + "renderScale"),
-           let renderScaleValue = RenderScale(rawValue: rs) {
-            renderScale = renderScaleValue
-        }
-        if let st = defaults.string(forKey: prefix + "scalingType"),
-           let scalingTypeValue = ScalingType(rawValue: st) {
-            scalingType = scalingTypeValue
-        }
-        if let qm = defaults.string(forKey: prefix + "qualityMode"),
-           let qualityModeValue = QualityMode(rawValue: qm) {
-            qualityMode = qualityModeValue
-        }
-        if let sf = defaults.string(forKey: prefix + "scaleFactor"),
-           let scaleFactorValue = ScaleFactorOption(rawValue: sf) {
-            scaleFactor = scaleFactorValue
-        }
-        if let fg = defaults.string(forKey: prefix + "frameGenMode"),
-           let frameGenModeValue = FrameGenMode(rawValue: fg) {
-            frameGenMode = frameGenModeValue
-        }
-        if let ft = defaults.string(forKey: prefix + "frameGenType"),
-           let frameGenTypeValue = FrameGenType(rawValue: ft) {
-            frameGenType = frameGenTypeValue
-        }
-        if let tfps = defaults.string(forKey: prefix + "targetFPS"),
-           let targetFPSValue = TargetFPS(rawValue: tfps) {
-            targetFPS = targetFPSValue
-        }
-        if let fm = defaults.string(forKey: prefix + "frameGenMultiplier"),
-           let frameGenMultiplierValue = FrameGenMultiplier(rawValue: fm) {
-            frameGenMultiplier = frameGenMultiplierValue
-        }
-        if let aa = defaults.string(forKey: prefix + "aaMode"),
-           let aaModeValue = AAMode(rawValue: aa) {
-            aaMode = aaModeValue
-        }
+        if let rs = defaults.string(forKey: prefix + "renderScale"), let val = RenderScale(rawValue: rs) { renderScale = val }
+        if let st = defaults.string(forKey: prefix + "scalingType"), let val = ScalingType(rawValue: st) { scalingType = val }
+        if let qm = defaults.string(forKey: prefix + "qualityMode"), let val = QualityMode(rawValue: qm) { qualityMode = val }
+        if let sf = defaults.string(forKey: prefix + "scaleFactor"), let val = ScaleFactorOption(rawValue: sf) { scaleFactor = val }
+        if let fg = defaults.string(forKey: prefix + "frameGenMode"), let val = FrameGenMode(rawValue: fg) { frameGenMode = val }
+        if let ft = defaults.string(forKey: prefix + "frameGenType"), let val = FrameGenType(rawValue: ft) { frameGenType = val }
+        if let tf = defaults.string(forKey: prefix + "targetFPS"), let val = TargetFPS(rawValue: tf) { targetFPS = val }
+        if let fm = defaults.string(forKey: prefix + "frameGenMultiplier"), let val = FrameGenMultiplier(rawValue: fm) { frameGenMultiplier = val }
+        if let aa = defaults.string(forKey: prefix + "aaMode"), let val = AAMode(rawValue: aa) { aaMode = val }
         
-        if defaults.object(forKey: prefix + "captureCursor") != nil {
-            captureCursor = defaults.bool(forKey: prefix + "captureCursor")
-        }
-        if defaults.object(forKey: prefix + "reduceLatency") != nil {
-            reduceLatency = defaults.bool(forKey: prefix + "reduceLatency")
-        }
-        if defaults.object(forKey: prefix + "adaptiveSync") != nil {
-            adaptiveSync = defaults.bool(forKey: prefix + "adaptiveSync")
-        }
-        if defaults.object(forKey: prefix + "showMGHUD") != nil {
-            showMGHUD = defaults.bool(forKey: prefix + "showMGHUD")
-        }
-        if defaults.object(forKey: prefix + "vsync") != nil {
-            vsync = defaults.bool(forKey: prefix + "vsync")
-        }
+        if defaults.object(forKey: prefix + "captureCursor") != nil { captureCursor = defaults.bool(forKey: prefix + "captureCursor") }
+        if defaults.object(forKey: prefix + "reduceLatency") != nil { reduceLatency = defaults.bool(forKey: prefix + "reduceLatency") }
+        if defaults.object(forKey: prefix + "adaptiveSync") != nil { adaptiveSync = defaults.bool(forKey: prefix + "adaptiveSync") }
+        if defaults.object(forKey: prefix + "showMGHUD") != nil { showMGHUD = defaults.bool(forKey: prefix + "showMGHUD") }
+        if defaults.object(forKey: prefix + "vsync") != nil { vsync = defaults.bool(forKey: prefix + "vsync") }
         if defaults.object(forKey: prefix + "sharpening") != nil {
-            let loadedSharpening = defaults.float(forKey: prefix + "sharpening")
-            sharpening = max(0.0, min(1.0, loadedSharpening))
+            sharpening = max(0.0, min(1.0, defaults.float(forKey: prefix + "sharpening")))
         }
         
         selectedProfile = name
@@ -428,37 +278,13 @@ final class CaptureSettings: ObservableObject {
                     "frameGenMode", "frameGenType", "targetFPS", "frameGenMultiplier", "aaMode",
                     "captureCursor", "reduceLatency", "adaptiveSync",
                     "showMGHUD", "vsync", "sharpening"]
-        for key in keys {
-            defaults.removeObject(forKey: prefix + key)
-        }
+        keys.forEach { defaults.removeObject(forKey: prefix + $0) }
     }
-    
     
     init() {
         if let savedProfiles = UserDefaults.standard.array(forKey: "PeachScaling.Profiles") as? [String] {
             profiles = savedProfiles
         }
         loadProfile("Default")
-    }
-}
-
-
-struct QualityProfile {
-    let scalerMode: MTLFXSpatialScalerColorProcessingMode
-    let sharpness: Float
-    let temporalBlend: Float
-}
-
-@available(macOS 15.0, *)
-extension CaptureSettings.QualityMode {
-    var profile: QualityProfile {
-        switch self {
-        case .performance:
-            return QualityProfile(scalerMode: .linear, sharpness: 0.3, temporalBlend: 0.15)
-        case .balanced:
-            return QualityProfile(scalerMode: .perceptual, sharpness: 0.5, temporalBlend: 0.1)
-        case .ultra:
-            return QualityProfile(scalerMode: .hdr, sharpness: 0.7, temporalBlend: 0.08)
-        }
     }
 }
