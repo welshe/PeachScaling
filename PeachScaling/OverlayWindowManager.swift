@@ -173,7 +173,9 @@ final class OverlayWindowManager: ObservableObject {
         
         windowUpdateTimer?.invalidate()
         windowUpdateTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            self?.updateWindowPosition()
+            Task { @MainActor [weak self] in
+                self?.updateWindowPosition()
+            }
         }
         
         if let observer = appObserver {
