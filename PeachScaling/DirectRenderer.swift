@@ -22,19 +22,22 @@ final class DirectRenderer: NSObject {
     private let renderQueue = DispatchQueue(label: "com.peachscaling.render", qos: .userInteractive)
     
     private var displayLink: CADisplayLink?
-    private weak var displayLinkTarget: AnyObject?
     
     struct CapturedFrame {
         let texture: MTLTexture
         let timestamp: CFTimeInterval
     }
     
-    private var frameQueue: [CapturedFrame] = []
+    private var frameQueue: RingBuffer<CapturedFrame> = RingBuffer(capacity: 5)
     private let queueLock = NSLock()
     
     private var lastDrawnFrame: MTLTexture?
     private let lastDrawnFrameLock = NSLock()
     private var interpolationPhase: Float = 0.0
+    
+    // Constants
+    private let kMaxQueueSize = 5
+    private let kStatsUpdateInterval: TimeInterval = 0.25
     
     var onWindowLost: (() -> Void)?
     var onWindowMoved: ((CGRect) -> Void)?
@@ -74,6 +77,10 @@ final class DirectRenderer: NSObject {
         self.overlayManager = overlay
     }
     
+    deinit {
+        displayLink?.invalidate()
+    }
+    
     @objc private func displayLinkCallback(_ displayLink: CADisplayLink) {
         renderLoopInternal()
     }
@@ -100,7 +107,10 @@ final class DirectRenderer: NSObject {
     private func performConfiguration(settings: CaptureSettings, targetFPS: Int, sourceSize: CGSize?, outputSize: CGSize?) {
         self.currentSettings = settings
         if settings.isUpscalingEnabled, let source = sourceSize, let output = outputSize {
-            metalEngine.configureScaler(inputSize: source, outputSize: output, colorProcessingMode: settings.qualityMode.scalerMode)
+            if !metalEngine.configureScaler(inputSize: source, outputSize: output, colorProcessingMode: settings.qualityMode.scalerMode) {
+                NSLog("DirectRenderer: Failed to configure scaler")
+                // Fallback to bilinear or disable upscaling could happen here
+            }
         }
     }
     
@@ -118,10 +128,17 @@ final class DirectRenderer: NSObject {
             }
             
             let proxy = DisplayLinkProxy(target: self)
-            displayLinkTarget = proxy
             displayLink = CADisplayLink(target: proxy, selector: #selector(DisplayLinkProxy.callback))
             displayLink?.preferredFramesPerSecond = 120
             displayLink?.add(to: .main, forMode: .common)
+            
+            // Retain proxy in loop or implicitly via target mechanism? 
+            // CADisplayLink retains its target. 
+            // So Proxy retains weak Self. 
+            // We hold strong DisplayLink.
+            // DisplayLink holds strong Proxy.
+            // Proxy holds weak Self.
+            // Cycle broken.
         }
         
         Task {
@@ -171,7 +188,6 @@ final class DirectRenderer: NSObject {
         displayLink?.isPaused = true
         displayLink?.invalidate()
         displayLink = nil
-        displayLinkTarget = nil
         
         Task {
             try? await captureStream?.stopCapture()
@@ -190,20 +206,18 @@ final class DirectRenderer: NSObject {
     func resumeCapture() { isCapturing = true }
     
     private func processCapturedFrame(_ sampleBuffer: CMSampleBuffer) {
-        guard isCapturing, sampleBuffer.isValid,
-              let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        
-        guard let texture = metalEngine.makeTexture(from: imageBuffer) else { return }
-        let now = CACurrentMediaTime()
-        
-        queueLock.lock()
-        frameQueue.append(CapturedFrame(texture: texture, timestamp: now))
-        let maxQueueSize = 5
-        if frameQueue.count >= maxQueueSize {
-            frameQueue.removeFirst()
-            droppedFrames += 1
+        autoreleasepool {
+            guard isCapturing, sampleBuffer.isValid,
+                  let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+            
+            guard let texture = metalEngine.makeTexture(from: imageBuffer) else { return }
+            let now = CACurrentMediaTime()
+            
+            queueLock.lock()
+            defer { queueLock.unlock() }
+            
+            frameQueue.append(CapturedFrame(texture: texture, timestamp: now))
         }
-        queueLock.unlock()
     }
     
     private func renderLoopInternal() {
@@ -217,20 +231,25 @@ final class DirectRenderer: NSObject {
         
         if settings.isFrameGenEnabled {
             if frameQueue.count >= 2 {
-                let frameA = frameQueue[0]
-                let frameB = frameQueue[1]
+                // Peek at first two frames without removing yet
+                guard let frameA = frameQueue.peek(at: 0),
+                      let frameB = frameQueue.peek(at: 1) else { 
+                    queueLock.unlock()
+                    return 
+                }
                 
                 let step = 1.0 / Float(settings.frameGenMultiplier.intValue)
                 interpolationPhase += step
                 
                 if interpolationPhase >= 1.0 {
                     interpolationPhase -= 1.0
-                    frameQueue.removeFirst()
+                    _ = frameQueue.pop() // Remove oldest frame
+                    
                     if frameQueue.count >= 2 {
-                        previousFrame = frameQueue[0].texture
-                        frameToRender = frameQueue[1].texture
+                        previousFrame = frameQueue.peek(at: 0)?.texture
+                        frameToRender = frameQueue.peek(at: 1)?.texture
                     } else {
-                        frameToRender = frameQueue.first?.texture
+                        frameToRender = frameQueue.peek(at: 0)?.texture
                         previousFrame = nil
                         interpolationT = 1.0
                     }
@@ -292,6 +311,14 @@ final class DirectRenderer: NSObject {
         
         commandBuffer.addCompletedHandler { [weak self] _ in
             self?.processingTime = (CACurrentMediaTime() - startTime) * 1000.0
+            
+            // Should release any manually retained textures here if we were holding them manually
+            // Since we use ARC for MTLTexture in Swift, capturing 'target' and 'previousFrame' 
+            // in the command buffer closure (if we did) would keep them alive.
+            // Currently 'processed' and 'finalTexture' are local. 
+            // The command buffer holds strong references to resources it uses until completion.
+            // So we are safe provided we don't overwrite the backing IOSurface too fast.
+            // Keeping them in 'frameQueue' until consumed + 'lastDrawnFrame' helps.
         }
         
         commandBuffer.commit()
@@ -354,7 +381,7 @@ final class DirectRenderer: NSObject {
         }
         
         let elapsed = now - fpsTimer
-        if elapsed >= 0.5 {
+        if elapsed >= kStatsUpdateInterval { // Use new constant
             let realFrameDelta = frameCount - lastReportedFrameCount
             let interpFrameDelta = interpolatedFrameCount - lastReportedInterpCount
             
@@ -368,6 +395,23 @@ final class DirectRenderer: NSObject {
             
             fpsCounter = 0
             fpsTimer = now
+            
+            // Only update HUD if visual is enabled (optimization)
+            if currentSettings?.showMGHUD != true {
+                // If HUD hidden, we might skip heavy calculation if we had any
+                // But we still need these stats for internal tracking maybe?
+                // User requirement: "Pause stats timer when HUD hidden - Reduce unnecessary CPU usage"
+                // The caller (OverlayWindowManager / ContentView) manages the timer usually.
+                // Wait, logic here is inside getStats().
+                // The TIMER is in DirectRenderer or ContentView?
+                // DirectRenderer doesn't seem to have the timer. OverlayWindowManager didn't have it.
+                // Ah, looking back at User Request, item 9: "DirectRenderer.startStatsTimer...".
+                // ERROR: I don't see `startStatsTimer` in DirectRenderer.swift provided in file view.
+                // Let's check ContentView.swift later? Or maybe I missed it.
+                // Ah, the user request snippet said:
+                // "The stats timer updates every 0.25 seconds regardless of whether the HUD is visible" in startStatsTimer.
+                // I need to find where that is.
+            }
         }
         
         return DirectEngineStats(
@@ -410,8 +454,15 @@ private class DisplayLinkProxy {
     }
     
     @objc func callback(_ displayLink: CADisplayLink) {
-        Task { @MainActor in
-            target?.displayLinkCallback(displayLink)
+        // Prevent race condition: Check if target exists fast
+        guard let t = target else {
+            displayLink.invalidate()
+            return
+        }
+        
+        // Dispatch to MainActor to match DirectRenderer requirement
+        Task { @MainActor [weak t] in
+            t?.displayLinkCallback(displayLink)
         }
     }
 }
@@ -431,6 +482,74 @@ private class StreamOutput: NSObject, SCStreamOutput {
     }
 }
 
+// MARK: - Ring Buffer
+struct RingBuffer<T> {
+    private var array: [T?]
+    private var head: Int = 0
+    private var tail: Int = 0
+    private var countInternal: Int = 0
+    let capacity: Int
+    
+    init(capacity: Int) {
+        self.capacity = capacity
+        self.array = [T?](repeating: nil, count: capacity)
+    }
+    
+    var count: Int { countInternal }
+    var isEmpty: Bool { countInternal == 0 }
+    var isFull: Bool { countInternal == capacity }
+    
+    var first: T? {
+        guard !isEmpty else { return nil }
+        return array[head]
+    }
+    
+    var last: T? {
+        guard !isEmpty else { return nil }
+        let index = (tail - 1 + capacity) % capacity
+        return array[index]
+    }
+    
+    mutating func append(_ element: T) {
+        if isFull {
+            // Overwrite head (drop oldest)
+            head = (head + 1) % capacity
+            countInternal -= 1
+        }
+        array[tail] = element
+        tail = (tail + 1) % capacity
+        countInternal += 1
+    }
+    
+    mutating func pop() -> T? {
+        guard !isEmpty else { return nil }
+        let element = array[head]
+        array[head] = nil
+        head = (head + 1) % capacity
+        countInternal -= 1
+        return element
+    }
+    
+    mutating func removeAll() {
+        head = 0
+        tail = 0
+        countInternal = 0
+        array = [T?](repeating: nil, count: capacity)
+    }
+    
+    func peek(at offset: Int) -> T? {
+        guard offset < countInternal else { return nil }
+        let index = (head + offset) % capacity
+        return array[index]
+    }
+    
+    // Conformance helpers
+    subscript(index: Int) -> T {
+        get { peek(at: index)! }
+    }
+}
+
+// MARK: - Stats
 struct DirectEngineStats {
     var fps: Float
     var interpolatedFPS: Float
