@@ -21,7 +21,7 @@ final class DirectRenderer: NSObject {
     private let captureQueue = DispatchQueue(label: "com.peachscaling.capture", qos: .userInteractive)
     private let renderQueue = DispatchQueue(label: "com.peachscaling.render", qos: .userInteractive)
     
-    private var displayLink: (any NSObjectProtocol)?
+    private var displayLink: CADisplayLink?
     
     struct CapturedFrame {
         let texture: MTLTexture
@@ -80,7 +80,7 @@ final class DirectRenderer: NSObject {
     }
     
     deinit {
-        (displayLink as? CADisplayLink)?.invalidate()
+        displayLink?.invalidate()
     }
     
     @objc private func displayLinkCallback() {
@@ -166,11 +166,11 @@ final class DirectRenderer: NSObject {
             } catch {
                 NSLog("DirectRenderer: Stream capture failed: \(error)")
                 onWindowLost?()
-                return false
+                return
             }
         }
         
-        (displayLink as? CADisplayLink)?.isPaused = false
+        displayLink?.isPaused = false
         
         return true
     }
@@ -178,7 +178,7 @@ final class DirectRenderer: NSObject {
     func stopCapture() {
         guard isCapturing else { return }
         
-        (displayLink as? CADisplayLink)?.invalidate()
+        displayLink?.invalidate()
         displayLink = nil
         
         Task {
@@ -362,7 +362,7 @@ final class DirectRenderer: NSObject {
     }
     
     func detachWindow() {
-        (displayLink as? CADisplayLink)?.isPaused = true
+        displayLink?.isPaused = true
         mtkView = nil
         overlayManager?.destroyOverlay()
     }
