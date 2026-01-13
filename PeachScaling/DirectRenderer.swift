@@ -38,6 +38,8 @@ final class DirectRenderer: NSObject {
     // Constants
     private let kMaxQueueSize = 5
     private let kStatsUpdateInterval: TimeInterval = 0.25
+    private let kStreamTimeScale: Int32 = 60
+    private let kDisplayLinkPreferredFPS: Int = 120
     
     var onWindowLost: (() -> Void)?
     var onWindowMoved: ((CGRect) -> Void)?
@@ -129,7 +131,7 @@ final class DirectRenderer: NSObject {
             
             let proxy = DisplayLinkProxy(target: self)
             displayLink = CADisplayLink(target: proxy, selector: #selector(DisplayLinkProxy.callback))
-            displayLink?.preferredFramesPerSecond = 120
+            displayLink?.preferredFramesPerSecond = kDisplayLinkPreferredFPS
             displayLink?.add(to: .main, forMode: .common)
             
             // Retain proxy in loop or implicitly via target mechanism? 
@@ -153,7 +155,7 @@ final class DirectRenderer: NSObject {
                 let config = SCStreamConfiguration()
                 config.width = Int(window.frame.width)
                 config.height = Int(window.frame.height)
-                config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
+                config.minimumFrameInterval = CMTime(value: 1, timescale: kStreamTimeScale)
                 config.pixelFormat = kCVPixelFormatType_32BGRA
                 config.queueDepth = 5
                 config.showsCursor = currentSettings?.captureCursor ?? true
@@ -216,7 +218,9 @@ final class DirectRenderer: NSObject {
             queueLock.lock()
             defer { queueLock.unlock() }
             
-            frameQueue.append(CapturedFrame(texture: texture, timestamp: now))
+            if frameQueue.append(CapturedFrame(texture: texture, timestamp: now)) {
+                droppedFrames += 1
+            }
         }
     }
     
@@ -510,7 +514,9 @@ struct RingBuffer<T> {
         return array[index]
     }
     
-    mutating func append(_ element: T) {
+    @discardableResult
+    mutating func append(_ element: T) -> Bool {
+        let dropped = isFull
         if isFull {
             // Overwrite head (drop oldest)
             head = (head + 1) % capacity
@@ -519,6 +525,7 @@ struct RingBuffer<T> {
         array[tail] = element
         tail = (tail + 1) % capacity
         countInternal += 1
+        return dropped
     }
     
     mutating func pop() -> T? {
