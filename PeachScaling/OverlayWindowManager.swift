@@ -187,14 +187,17 @@ final class OverlayWindowManager: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] notification in
-            guard let self = self else { return }
-            guard self.targetPID != 0 else { return }
             guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
             
-            if app.processIdentifier == self.targetPID {
-                self.overlayWindow?.orderFrontRegardless()
-            } else {
-                self.overlayWindow?.orderOut(nil)
+            Task { @MainActor in
+                guard let self = self else { return }
+                guard self.targetPID != 0 else { return }
+                
+                if app.processIdentifier == self.targetPID {
+                    self.overlayWindow?.orderFrontRegardless()
+                } else {
+                    self.overlayWindow?.orderOut(nil)
+                }
             }
         }
     }
