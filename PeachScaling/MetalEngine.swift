@@ -143,17 +143,23 @@ final class MetalEngine {
         samplerState = device.makeSamplerState(descriptor: samplerDesc)
     }
     
-    func configureScaler(inputSize: CGSize, outputSize: CGSize, colorProcessingMode: MTLFXSpatialScalerColorProcessingMode = .perceptual) {
-        guard inputSize.width > 0, inputSize.height > 0, outputSize.width > 0, outputSize.height > 0 else { return }
+    func configureScaler(inputSize: CGSize, outputSize: CGSize, colorProcessingMode: MTLFXSpatialScalerColorProcessingMode = .perceptual) -> Bool {
+        guard inputSize.width > 0, inputSize.height > 0, outputSize.width > 0, outputSize.height > 0 else { return false }
         
-        let maxTextureSize = device.supportsFamily(.apple3) ? 16384 : 8192
-        guard Int(outputSize.width) <= maxTextureSize, Int(outputSize.height) <= maxTextureSize else { return }
+        let kMaxTextureSizeApple = 16384
+        let kMaxTextureSizeDefault = 8192
+        let maxTextureSize = device.supportsFamily(.apple3) ? kMaxTextureSizeApple : kMaxTextureSizeDefault
+        guard Int(outputSize.width) <= maxTextureSize, Int(outputSize.height) <= maxTextureSize else { return false }
         
         // Check if existing scaler is still valid and parameters match
         if let existingScaler = spatialScaler,
            scalerInputSize == inputSize && scalerOutputSize == outputSize && scalerColorMode == colorProcessingMode {
-            return
+            return true
         }
+        
+        // Explicitly release old resources
+        outputTexture = nil
+        spatialScaler = nil
         
         let descriptor = MTLFXSpatialScalerDescriptor()
         descriptor.inputWidth = Int(inputSize.width)
@@ -166,7 +172,7 @@ final class MetalEngine {
         
         guard let newScaler = descriptor.makeSpatialScaler(device: device) else {
             NSLog("MetalEngine: Failed to create spatial scaler")
-            return
+            return false
         }
         
         spatialScaler = newScaler
@@ -178,6 +184,8 @@ final class MetalEngine {
         outputDesc.usage = [.shaderWrite, .shaderRead, .renderTarget]
         outputDesc.storageMode = .private
         outputTexture = device.makeTexture(descriptor: outputDesc)
+        
+        return outputTexture != nil
     }
     
     func makeTexture(from imageBuffer: CVImageBuffer) -> MTLTexture? {
@@ -276,9 +284,10 @@ final class MetalEngine {
             commandBuffer: commandBuffer
          )
          
-         previousTexture = texture
-         
-         commandBuffer.addCompletedHandler { _ in completion(result) }
+         commandBuffer.addCompletedHandler { [weak self] _ in 
+             self?.previousTexture = texture
+             completion(result) 
+         }
          commandBuffer.commit()
     }
     
