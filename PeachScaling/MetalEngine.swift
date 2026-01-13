@@ -286,13 +286,15 @@ final class MetalEngine {
     func generateMotionVectors(previous: MTLTexture, current: MTLTexture, commandBuffer: MTLCommandBuffer) -> MTLTexture? {
         guard let pso = motionEstimationPSO else { return nil }
         
-        // Add bounds checking for motion texture creation
         let width = max(1, current.width / 8)
         let height = max(1, current.height / 8)
         
-        // Ensure minimum texture size
-        let finalWidth = min(width, device.maxTextureWidth)
-        let finalHeight = min(height, device.maxTextureHeight)
+        guard width > 0 && height > 0 && width <= device.maxTextureWidth && height <= device.maxTextureHeight else {
+            return nil
+        }
+        
+        let finalWidth = width
+        let finalHeight = height
         
         if motionTexture == nil || motionTexture?.width != finalWidth || motionTexture?.height != finalHeight {
             let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rg16Float, width: finalWidth, height: finalHeight, mipmapped: false)
