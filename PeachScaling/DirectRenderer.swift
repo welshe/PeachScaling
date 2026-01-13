@@ -7,14 +7,14 @@ import CoreVideo
 import QuartzCore
 
 @available(macOS 15.0, *)
-@MainActor
 final class DirectRenderer: NSObject {
     
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private let metalEngine: MetalEngine
-    private var overlayManager: OverlayWindowManager?
-    private var mtkView: MTKView?
+    
+    @MainActor private var overlayManager: OverlayWindowManager?
+    @MainActor private var mtkView: MTKView?
     
     private var captureStream: SCStream?
     private var streamOutput: StreamOutput?
@@ -50,7 +50,15 @@ final class DirectRenderer: NSObject {
     
     private var frameCount: UInt64 = 0
     private var interpolatedFrameCount: UInt64 = 0
-    private var droppedFrames: UInt64 = 0
+    
+    // Protected by queueLock
+    private var _droppedFrames: UInt64 = 0
+    var droppedFrames: UInt64 {
+        queueLock.lock()
+        defer { queueLock.unlock() }
+        return _droppedFrames
+    }
+    
     private var fpsCounter: Int = 0
     private var fpsTimer: CFTimeInterval = 0
     
@@ -60,7 +68,14 @@ final class DirectRenderer: NSObject {
     private var currentSettings: CaptureSettings?
     private var targetWindowID: CGWindowID = 0
     private var targetPID: pid_t = 0
-    private var isCapturing: Bool = false
+    
+    // Protected by queueLock
+    private var _isCapturing: Bool = false
+    var isCapturing: Bool {
+        queueLock.lock()
+        defer { queueLock.unlock() }
+        return _isCapturing
+    }
     
     private var settingsUpdatePending = false
     private var pendingConfig: (() -> Void)?
@@ -87,11 +102,11 @@ final class DirectRenderer: NSObject {
         displayLink?.invalidate()
     }
     
-    @objc private func displayLinkCallback() {
+    @MainActor @objc private func displayLinkCallback() {
         renderLoopInternal()
     }
     
-    func configure(from settings: CaptureSettings, targetFPS: Int = 120, sourceSize: CGSize? = nil, outputSize: CGSize? = nil) {
+    @MainActor func configure(from settings: CaptureSettings, targetFPS: Int = 120, sourceSize: CGSize? = nil, outputSize: CGSize? = nil) {
         if settingsUpdatePending {
             pendingConfig = { [weak self] in
                 self?.performConfiguration(settings: settings, targetFPS: targetFPS, sourceSize: sourceSize, outputSize: outputSize)
@@ -120,7 +135,7 @@ final class DirectRenderer: NSObject {
         }
     }
     
-    func startCapture(windowID: CGWindowID, pid: pid_t = 0) -> Bool {
+    @MainActor func startCapture(windowID: CGWindowID, pid: pid_t = 0) -> Bool {
         guard !isCapturing else { return false }
         
         targetWindowID = windowID
@@ -182,7 +197,10 @@ final class DirectRenderer: NSObject {
                 if success {
                     self.captureStream = stream
                     self.streamOutput = output
-                    self.isCapturing = true
+                    
+                    self.queueLock.lock()
+                    self._isCapturing = true
+                    self.queueLock.unlock()
                 }
                 
             } catch {
@@ -197,7 +215,7 @@ final class DirectRenderer: NSObject {
         return true
     }
     
-    func stopCapture() {
+    @MainActor func stopCapture() {
         guard isCapturing else { return }
         
         displayLink?.invalidate()
@@ -208,7 +226,11 @@ final class DirectRenderer: NSObject {
             await MainActor.run {
                 self.captureStream = nil
                 self.streamOutput = nil
-                self.isCapturing = false
+                
+                self.queueLock.lock()
+                self._isCapturing = false
+                self.queueLock.unlock()
+                
                 self.metalEngine.reset()
                 
                 self.queueLock.lock()
@@ -227,8 +249,16 @@ final class DirectRenderer: NSObject {
     
     nonisolated private func processCapturedFrame(_ sampleBuffer: CMSampleBuffer) {
         autoreleasepool {
-            guard isCapturing, sampleBuffer.isValid,
+            guard sampleBuffer.isValid,
                   let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+            
+            // Check capturing state safely
+            queueLock.lock()
+            if !_isCapturing {
+                queueLock.unlock()
+                return
+            }
+            queueLock.unlock()
             
             guard let texture = metalEngine.makeTexture(from: imageBuffer) else { return }
             let now = CACurrentMediaTime()
@@ -236,13 +266,16 @@ final class DirectRenderer: NSObject {
             queueLock.lock()
             defer { queueLock.unlock() }
             
+            // Re-check state inside lock before mutating
+            guard _isCapturing else { return }
+            
             if frameQueue.append(CapturedFrame(texture: texture, timestamp: now)) {
-                droppedFrames += 1
+                _droppedFrames += 1
             }
         }
     }
     
-    private func renderLoopInternal() {
+    @MainActor private func renderLoopInternal() {
         guard let settings = currentSettings else { return }
         
         let selection = selectFrameForRendering(settings: settings)
@@ -344,7 +377,7 @@ final class DirectRenderer: NSObject {
         commandBuffer.commit()
     }
     
-    func attachToScreen(_ screen: NSScreen? = nil, size: CGSize? = nil, windowFrame: CGRect? = nil) {
+    @MainActor func attachToScreen(_ screen: NSScreen? = nil, size: CGSize? = nil, windowFrame: CGRect? = nil) {
         guard let targetScreen = screen ?? NSScreen.main ?? NSScreen.screens.first else { return }
         let displaySize = size ?? targetScreen.frame.size
         
@@ -385,7 +418,7 @@ final class DirectRenderer: NSObject {
         }
     }
     
-    func detachWindow() {
+    @MainActor func detachWindow() {
         displayLink?.isPaused = true
         mtkView = nil
         overlayManager?.destroyOverlay()
@@ -433,30 +466,35 @@ final class DirectRenderer: NSObject {
                 // I need to find where that is.
             }
         }
-        
-        return DirectEngineStats(
-            fps: interpolatedFPS,
-            interpolatedFPS: interpolatedFPS,
-            captureFPS: currentFPS,
-            frameTime: Float(processingTime),
-            gpuTime: Float(processingTime * 0.8),
-            captureLatency: Float(processingTime * 0.1),
-            presentLatency: Float(processingTime * 0.1),
-            frameCount: frameCount,
-            interpolatedFrameCount: interpolatedFrameCount,
-            droppedFrames: droppedFrames,
-            gpuMemoryUsed: 0,
-            gpuMemoryTotal: 0,
-            textureMemoryUsed: 0,
-            renderEncoders: 0,
-            computeEncoders: 0,
-            blitEncoders: 0,
-            commandBuffers: 0,
-            drawCalls: 0,
-            upscaleMode: 0,
-            frameGenMode: 0,
-            aaMode: 0
-        )
+            var drops: UInt64 = 0
+            
+            self.queueLock.lock()
+            drops = self._droppedFrames
+            self.queueLock.unlock()
+            
+            return DirectEngineStats(
+                fps: interpolatedFPS,
+                interpolatedFPS: interpolatedFPS,
+                captureFPS: currentFPS,
+                frameTime: Float(processingTime),
+                gpuTime: Float(processingTime * 0.8),
+                captureLatency: Float(processingTime * 0.1),
+                presentLatency: Float(processingTime * 0.1),
+                frameCount: frameCount,
+                interpolatedFrameCount: interpolatedFrameCount,
+                droppedFrames: drops,
+                gpuMemoryUsed: 0,
+                gpuMemoryTotal: 0,
+                textureMemoryUsed: 0,
+                renderEncoders: 0,
+                computeEncoders: 0,
+                blitEncoders: 0,
+                commandBuffers: 0,
+                drawCalls: 0,
+                upscaleMode: 0,
+                frameGenMode: 0,
+                aaMode: 0
+            )
     }
 }
 
