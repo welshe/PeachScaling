@@ -3,7 +3,7 @@ import MetalFX
 
 @available(macOS 15.0, *)
 final class CaptureSettings: ObservableObject {
-    static let shared = CaptureSettings()
+
     
     @Published var selectedProfile: String = "Default"
     @Published var profiles: [String] = ["Default", "Performance", "Quality", "Ultra"]
