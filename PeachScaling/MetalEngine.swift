@@ -161,7 +161,7 @@ final class MetalEngine {
         guard Int(outputSize.width) <= maxTextureSize, Int(outputSize.height) <= maxTextureSize else { return false }
         
         // Check if existing scaler is still valid and parameters match
-        if let existingScaler = spatialScaler,
+        if spatialScaler != nil,
            scalerInputSize == inputSize && scalerOutputSize == outputSize && scalerColorMode == colorProcessingMode {
             return true
         }
@@ -307,7 +307,11 @@ final class MetalEngine {
         let width = max(1, current.width / 8)
         let height = max(1, current.height / 8)
         
-        guard width > 0 && height > 0 && width <= device.maxTextureWidth && height <= device.maxTextureHeight else {
+        let kMaxTextureSizeApple = 16384
+        let kMaxTextureSizeDefault = 8192
+        let maxTextureSize = device.supportsFamily(.apple3) ? kMaxTextureSizeApple : kMaxTextureSizeDefault
+        
+        guard width > 0 && height > 0 && width <= maxTextureSize && height <= maxTextureSize else {
             return nil
         }
         
@@ -464,7 +468,7 @@ final class MetalEngine {
         let outputSize = CGSize(width: inputSize.width * CGFloat(settings.scaleFactor.floatValue), height: inputSize.height * CGFloat(settings.scaleFactor.floatValue))
         
         if settings.scalingType.usesMetalFX {
-            configureScaler(inputSize: inputSize, outputSize: outputSize, colorProcessingMode: settings.qualityMode.scalerMode)
+            _ = configureScaler(inputSize: inputSize, outputSize: outputSize, colorProcessingMode: settings.qualityMode.scalerMode)
             
             guard let scaler = spatialScaler, let output = outputTexture else {
                 NSLog("MetalEngine: MetalFX scaler not available, falling back to bilinear")
