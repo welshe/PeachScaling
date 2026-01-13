@@ -88,11 +88,12 @@ final class DirectRenderer: NSObject {
         self.device = dev
         self.commandQueue = queue
         self.metalEngine = engine
+
+        super.init()
+        
         engine.onWarning = { [weak self] msg in
             self?.onWarning?(msg)
         }
-
-        super.init()
         
         guard let overlay = OverlayWindowManager(device: dev) else { return nil }
         self.overlayManager = overlay
