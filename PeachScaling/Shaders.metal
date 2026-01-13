@@ -108,6 +108,9 @@ kernel void estimateMotion(
     for (int i = 0; i < 4; i++) {
         float2 motion = offsetsLarge[i];
         float2 testUV = uv + (motion / texSize);
+        
+         if (testUV.x < 0.0 || testUV.x > 1.0 || testUV.y < 0.0 || testUV.y > 1.0) continue;
+         
         float3 prev = previousFrame.sample(s, testUV).rgb;
         float error = length(centerCurr - prev);
         
@@ -132,6 +135,9 @@ kernel void estimateMotion(
     for (int i = 0; i < 4; i++) {
         float2 motion = centerSearch + offsetsSmall[i];
         float2 testUV = uv + (motion / texSize);
+        
+        if (testUV.x < 0.0 || testUV.x > 1.0 || testUV.y < 0.0 || testUV.y > 1.0) continue;
+        
         float3 prev = previousFrame.sample(s, testUV).rgb;
         float error = length(centerCurr - prev);
         
