@@ -54,232 +54,12 @@ struct ContentView: View {
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {
-
             HStack(spacing: 0) {
-
-                VStack(alignment: .leading) {
-                    VStack(alignment: .leading, spacing: 12) {
-
-                        Text("Scaling Info")
-                            .font(.headline)
-                            .padding([.top, .horizontal])
-
-                        VStack(alignment: .leading, spacing: 8) {
-                            InfoRow(label: "Status", value: isScalingActive ? "Active" : "Idle")
-                            InfoRow(label: "FPS", value: currentFPS > 0 ? String(format: "%.1f", currentFPS) : "-")
-
-                            if interpolatedFPS > currentFPS {
-                                InfoRow(label: "Interp FPS", value: String(format: "%.1f", interpolatedFPS))
-                            }
-
-                            InfoRow(label: "Latency", value: processingTime > 0 ? String(format: "%.2f ms", processingTime) : "-")
-
-                            InfoRow(label: "Process", value: connectedProcessName)
-                            InfoRow(label: "PID", value: String(connectedPID))
-                            InfoRow(label: "Window ID", value: String(connectedWindowID))
-
-                            InfoRow(label: "Frame",
-                                    value: connectedSize.width > 0 ?
-                                           "\(Int(connectedSize.width)) x \(Int(connectedSize.height))" : "-")
-
-                            InfoRow(label: "Display ID",
-                                    value: targetDisplayID.map { String($0) } ?? "-")
-                        }
-                        .padding(.horizontal)
-                        .padding(.bottom)
-
-                        Spacer()
-
-                        HStack {
-                            Spacer()
-                            Menu {
-                                Button("About") {
-                                    let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
-                                    let b = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""
-                                    alertMessage = "PeachScaling v\(v) (\(b))\n\nA macOS port of Lossless Scaling\nGPU-accelerated frame scaling"
-                                    showAlert = true
-                                }
-                                Button("Check for Updates") {
-                                    alertMessage = "You're running the latest version."
-                                    showAlert = true
-                                }
-                            } label: {
-                                Image(systemName: "gearshape")
-                            }
-                        }
-                        .padding()
-                    }
-                }
-                .frame(width: 200)
-                .background(Color.black.opacity(0.3))
-                .disabled(!permissionsGranted)
-
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 20) {
-
-                        if !permissionsGranted {
-                            PermissionBanner(
-                                axGranted: axGranted,
-                                recGranted: recGranted,
-                                requestAX: {
-                                    let opts = [
-                                        kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true
-                                    ] as CFDictionary
-                                    AXIsProcessTrustedWithOptions(opts)
-                                },
-                                requestREC: {
-                                    _ = CGRequestScreenCaptureAccess()
-                                }
-                            )
-                            .padding(.bottom, 8)
-                        }
-
-                        HStack {
-                            Text("Profile: \"Default\"")
-                                .font(.largeTitle).bold()
-                            Spacer()
-
-                            if isScalingActive {
-                                Button("STOP SCALING") { stop() }
-                                    .buttonStyle(ActionButtonStyle(color: .red))
-
-                            } else if isCountingDown {
-                                Text("\(countdown)")
-                                    .font(.title2)
-                                    .foregroundColor(ACCENT_RED)
-
-                            } else {
-                                Button("START SCALING") { startCountdown() }
-                                    .buttonStyle(ActionButtonStyle(color: .green))
-                                    .disabled(!permissionsGranted)
-                                    .opacity(permissionsGranted ? 1.0 : 0.5)
-                            }
-                        }
-                        .padding(.bottom, 10)
-
-                        HStack(alignment: .top, spacing: 20) {
-
-                            VStack(spacing: 16) {
-
-                                ConfigPanel(title: "Upscaling") {
-                                    PickerRow(label: "Method",
-                                              selection: $settings.scalingType,
-                                              helpText: "Upscaling mode:\n• Off: No upscaling\n• MGUP-1 / Fast / Quality")
-
-                                    if settings.scalingType != .off {
-                                        PickerRow(label: "Scale Factor",
-                                                  selection: $settings.scaleFactor,
-                                                  helpText: "Upscale multiplier (1.5x – 10x).")
-
-                                        PickerRow(label: "Render Scale",
-                                                  selection: $settings.renderScale,
-                                                  helpText: "Internal capture resolution %.")
-                                    }
-                                }
-
-                                ConfigPanel(title: "Frame Generation") {
-
-                                    PickerRow(label: "Mode",
-                                              selection: $settings.frameGenMode,
-                                              helpText: "• Off: lowest latency\n• MGFG-1: optical-flow generation")
-
-                                    if settings.frameGenMode != .off {
-                                        Text(settings.frameGenMode.description)
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                            .padding(.leading, 4)
-
-                                        PickerRow(label: "Type",
-                                                  selection: $settings.frameGenType,
-                                                  helpText: "• Adaptive: auto-adjusts to target FPS\n• Fixed: manual multiplier")
-
-                                        if settings.frameGenType == .adaptive {
-                                            PickerRow(label: "Target FPS",
-                                                      selection: $settings.targetFPS,
-                                                      helpText: "Target frame rate for adaptive generation.")
-                                        } else {
-                                            PickerRow(label: "Multiplier",
-                                                      selection: $settings.frameGenMultiplier,
-                                                      helpText: "2× / 3× / 4× frame multiplication.")
-                                        }
-
-                                        ToggleRow(label: "Reduce Latency",
-                                                  isOn: $settings.reduceLatency,
-                                                  helpText: "Optimized pacing & compute submission.")
-                                    }
-                                }
-
-                                ConfigPanel(title: "Anti-Aliasing") {
-
-                                    PickerRow(label: "Mode",
-                                              selection: $settings.aaMode,
-                                              helpText: "• FXAA\n• SMAA\n• MSAA\n• TAA")
-
-                                    if settings.aaMode != .off {
-                                        Text(settings.aaMode.description)
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                            .padding(.leading, 4)
-                                    }
-                                }
-
-                            }
-                            .frame(maxWidth: .infinity)
-
-                            VStack(spacing: 16) {
-
-                                if settings.scalingType == .mgup1 || settings.scalingType == .mgup1Quality {
-                                    ConfigPanel(title: "MGUP-1 Settings") {
-                                        PickerRow(label: "Quality",
-                                                  selection: $settings.qualityMode,
-                                                  helpText: "MetalFX color processing + CAS")
-
-                                        Text("Using MetalFX Spatial AI Upscaling")
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                    }
-                                }
-
-                                ConfigPanel(title: "Display Settings") {
-
-                                    ToggleRow(label: "Show MG HUD",
-                                              isOn: $settings.showMGHUD,
-                                              helpText: "Performance overlay")
-
-                                    ToggleRow(label: "Capture Cursor",
-                                              isOn: $settings.captureCursor,
-                                              helpText: "Include mouse cursor")
-
-                                    ToggleRow(label: "VSync",
-                                              isOn: $settings.vsync,
-                                              helpText: "Sync to display refresh")
-
-                                    ToggleRow(label: "Adaptive Sync",
-                                              isOn: $settings.adaptiveSync,
-                                              helpText: "Automatically adjust output pacing")
-
-                                    SliderRow(label: "Sharpness",
-                                              value: $settings.sharpening,
-                                              range: 0...1,
-                                              helpText: "CAS intensity")
-                                }
-                            }
-                            .frame(maxWidth: .infinity)
-                        }
-                        .disabled(!permissionsGranted)
-                        .opacity(permissionsGranted ? 1.0 : 0.5)
-                    }
-                    .padding(24)
-                }
-                .background(BG_COLOR)
+                sidebarView
+                mainSettingsScrollView
             }
-
-            Text(macOSVersionString)
-                .font(.caption2)
-                .foregroundColor(.gray.opacity(0.5))
-                .padding(6)
+            versionFooter
         }
-
         .onAppear {
             startPermissionTimer()
             initializeDirectRenderer()
@@ -296,27 +76,13 @@ struct ContentView: View {
                 NSEvent.removeMonitor(local)
             }
         }
-        .onChange(of: settings.vsync) {
-            updateRendererConfig()
-        }
-        .onChange(of: settings.scaleFactor) {
-            updateRendererConfig()
-        }
-        .onChange(of: settings.scalingType) {
-            updateRendererConfig()
-        }
-        .onChange(of: settings.frameGenMode) {
-            updateRendererConfig()
-        }
-        .onChange(of: settings.aaMode) {
-            updateRendererConfig()
-        }
-        .onChange(of: settings.renderScale) {
-            updateRendererConfig()
-        }
-        .onChange(of: settings.sharpening) {
-            updateRendererConfig()
-        }
+        .onChange(of: settings.vsync) { updateRendererConfig() }
+        .onChange(of: settings.scaleFactor) { updateRendererConfig() }
+        .onChange(of: settings.scalingType) { updateRendererConfig() }
+        .onChange(of: settings.frameGenMode) { updateRendererConfig() }
+        .onChange(of: settings.aaMode) { updateRendererConfig() }
+        .onChange(of: settings.renderScale) { updateRendererConfig() }
+        .onChange(of: settings.sharpening) { updateRendererConfig() }
         .onChange(of: settings.showMGHUD) {
             if settings.showMGHUD && isScalingActive {
                 hudController.show(compact: false)
@@ -333,6 +99,233 @@ struct ContentView: View {
         } message: {
             Text(alertMessage)
         }
+    }
+
+    @ViewBuilder
+    private var sidebarView: some View {
+        VStack(alignment: .leading) {
+            VStack(alignment: .leading, spacing: 12) {
+
+                Text("Scaling Info")
+                    .font(.headline)
+                    .padding([.top, .horizontal])
+
+                VStack(alignment: .leading, spacing: 8) {
+                    InfoRow(label: "Status", value: isScalingActive ? "Active" : "Idle")
+                    InfoRow(label: "FPS", value: currentFPS > 0 ? String(format: "%.1f", currentFPS) : "-")
+
+                    if interpolatedFPS > currentFPS {
+                        InfoRow(label: "Interp FPS", value: String(format: "%.1f", interpolatedFPS))
+                    }
+
+                    InfoRow(label: "Latency", value: processingTime > 0 ? String(format: "%.2f ms", processingTime) : "-")
+
+                    InfoRow(label: "Process", value: connectedProcessName)
+                    InfoRow(label: "PID", value: String(connectedPID))
+                    InfoRow(label: "Window ID", value: String(connectedWindowID))
+
+                    InfoRow(label: "Frame",
+                            value: connectedSize.width > 0 ?
+                                   "\(Int(connectedSize.width)) x \(Int(connectedSize.height))" : "-")
+
+                    InfoRow(label: "Display ID",
+                            value: targetDisplayID.map { String($0) } ?? "-")
+                }
+                .padding(.horizontal)
+                .padding(.bottom)
+
+                Spacer()
+
+                HStack {
+                    Spacer()
+                    Menu {
+                        Button("About") {
+                            let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
+                            let b = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""
+                            alertMessage = "PeachScaling v\(v) (\(b))\n\nA macOS port of Lossless Scaling\nGPU-accelerated frame scaling"
+                            showAlert = true
+                        }
+                        Button("Check for Updates") {
+                            alertMessage = "You're running the latest version."
+                            showAlert = true
+                        }
+                    } label: {
+                        Image(systemName: "gearshape")
+                    }
+                }
+                .padding()
+            }
+        }
+        .frame(width: 200)
+        .background(Color.black.opacity(0.3))
+        .disabled(!permissionsGranted)
+    }
+
+    @ViewBuilder
+    private var mainSettingsScrollView: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+
+                if !permissionsGranted {
+                    PermissionBanner(
+                        axGranted: axGranted,
+                        recGranted: recGranted,
+                        requestAX: {
+                            let opts = [
+                                kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true
+                            ] as CFDictionary
+                            AXIsProcessTrustedWithOptions(opts)
+                        },
+                        requestREC: {
+                            _ = CGRequestScreenCaptureAccess()
+                        }
+                    )
+                    .padding(.bottom, 8)
+                }
+
+                HStack {
+                    Text("Profile: \"Default\"")
+                        .font(.largeTitle).bold()
+                    Spacer()
+
+                    if isScalingActive {
+                        Button("STOP SCALING") { stop() }
+                            .buttonStyle(ActionButtonStyle(color: .red))
+
+                    } else if isCountingDown {
+                        Text("\(countdown)")
+                            .font(.title2)
+                            .foregroundColor(ACCENT_RED)
+
+                    } else {
+                        Button("START SCALING") { startCountdown() }
+                            .buttonStyle(ActionButtonStyle(color: .green))
+                            .disabled(!permissionsGranted)
+                            .opacity(permissionsGranted ? 1.0 : 0.5)
+                    }
+                }
+                .padding(.bottom, 10)
+
+                settingsConfigGrid
+            }
+            .padding(24)
+        }
+        .background(BG_COLOR)
+    }
+
+    @ViewBuilder
+    private var settingsConfigGrid: some View {
+        HStack(alignment: .top, spacing: 20) {
+            VStack(spacing: 16) {
+                ConfigPanel(title: "Upscaling") {
+                    PickerRow(label: "Method",
+                              selection: $settings.scalingType,
+                              helpText: "Upscaling mode:\n• Off: No upscaling\n• MGUP-1 / Fast / Quality")
+
+                    if settings.scalingType != .off {
+                        PickerRow(label: "Scale Factor",
+                                  selection: $settings.scaleFactor,
+                                  helpText: "Upscale multiplier (1.5x – 10x).")
+
+                        PickerRow(label: "Render Scale",
+                                  selection: $settings.renderScale,
+                                  helpText: "Internal capture resolution %.")
+                    }
+                }
+
+                ConfigPanel(title: "Frame Generation") {
+                    PickerRow(label: "Mode",
+                              selection: $settings.frameGenMode,
+                              helpText: "• Off: lowest latency\n• MGFG-1: optical-flow generation")
+
+                    if settings.frameGenMode != .off {
+                        Text(settings.frameGenMode.description)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .padding(.leading, 4)
+
+                        PickerRow(label: "Type",
+                                  selection: $settings.frameGenType,
+                                  helpText: "• Adaptive: auto-adjusts to target FPS\n• Fixed: manual multiplier")
+
+                        if settings.frameGenType == .adaptive {
+                            PickerRow(label: "Target FPS",
+                                      selection: $settings.targetFPS,
+                                      helpText: "Target frame rate for adaptive generation.")
+                        } else {
+                            PickerRow(label: "Multiplier",
+                                      selection: $settings.frameGenMultiplier,
+                                      helpText: "2× / 3× / 4× frame multiplication.")
+                        }
+
+                        ToggleRow(label: "Reduce Latency",
+                                  isOn: $settings.reduceLatency,
+                                  helpText: "Optimized pacing & compute submission.")
+                    }
+                }
+
+                ConfigPanel(title: "Anti-Aliasing") {
+                    PickerRow(label: "Mode",
+                              selection: $settings.aaMode,
+                              helpText: "• FXAA\n• SMAA\n• MSAA\n• TAA")
+
+                    if settings.aaMode != .off {
+                        Text(settings.aaMode.description)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .padding(.leading, 4)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity)
+
+            VStack(spacing: 16) {
+                if settings.scalingType == .mgup1 || settings.scalingType == .mgup1Quality {
+                    ConfigPanel(title: "MGUP-1 Settings") {
+                        PickerRow(label: "Quality",
+                                  selection: $settings.qualityMode,
+                                  helpText: "MetalFX color processing + CAS")
+
+                        Text("Using MetalFX Spatial AI Upscaling")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                ConfigPanel(title: "Display Settings") {
+                    ToggleRow(label: "Show MG HUD",
+                              isOn: $settings.showMGHUD,
+                              helpText: "Performance overlay")
+
+                    ToggleRow(label: "Capture Cursor",
+                              isOn: $settings.captureCursor,
+                              helpText: "Include mouse cursor")
+
+                    ToggleRow(label: "VSync",
+                              isOn: $settings.vsync,
+                              helpText: "Sync to display refresh")
+
+                    ToggleRow(label: "Adaptive Sync",
+                              isOn: $settings.adaptiveSync,
+                              helpText: "Automatically adjust output pacing")
+
+                    SliderRow(label: "Sharpness",
+                              value: $settings.sharpening,
+                              range: 0...1,
+                              helpText: "CAS intensity")
+                }
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .disabled(!permissionsGranted)
+        .opacity(permissionsGranted ? 1.0 : 0.5)
+    }
+
+    private var versionFooter: some View {
+        Text(macOSVersionString)
+            .font(.caption2)
+            .foregroundColor(.gray.opacity(0.5))
+            .padding(6)
     }
 
     private func initializeDirectRenderer() {
