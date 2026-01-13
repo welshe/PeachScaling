@@ -80,11 +80,21 @@ final class DirectRenderer: NSObject {
     }
     
     deinit {
-        displayLink?.invalidate()
+        if let displayLink = displayLink {
+            CVDisplayLinkStop(displayLink)
+        }
     }
     
-    @objc private func displayLinkCallback(_ displayLink: CADisplayLink) {
-        renderLoopInternal()
+    private let displayLinkOutputCallback: CVDisplayLinkOutputCallback = { (displayLink, inNow, inOutputTime, flagsIn, flagsOut, displayLinkContext) -> CVReturn in
+        let renderer = Unmanaged<DirectRenderer>.fromOpaque(displayLinkContext!).takeUnretainedValue()
+        renderer.displayLinkCallback()
+        return kCVReturnSuccess
+    }
+    
+    @objc private func displayLinkCallback() {
+        Task { @MainActor in
+            renderLoopInternal()
+        }
     }
     
     func configure(from settings: CaptureSettings, targetFPS: Int = 120, sourceSize: CGSize? = nil, outputSize: CGSize? = nil) {
@@ -123,24 +133,18 @@ final class DirectRenderer: NSObject {
         targetPID = pid
         
         if displayLink == nil {
-            guard let screen = NSScreen.main else {
-                NSLog("DirectRenderer: No screen available for display link")
+            var link: CVDisplayLink?
+            let result = CVDisplayLinkCreateWithActiveCGDisplays(&link)
+            guard result == kCVReturnSuccess, let displayLink = link else {
+                NSLog("DirectRenderer: Failed to create display link")
                 onWindowLost?()
                 return false
             }
             
-            let proxy = DisplayLinkProxy(target: self)
-            displayLink = CADisplayLink(target: proxy, selector: #selector(DisplayLinkProxy.callback))
-            displayLink?.preferredFramesPerSecond = kDisplayLinkPreferredFPS
-            displayLink?.add(to: .main, forMode: .common)
-            
-            // Retain proxy in loop or implicitly via target mechanism? 
-            // CADisplayLink retains its target. 
-            // So Proxy retains weak Self. 
-            // We hold strong DisplayLink.
-            // DisplayLink holds strong Proxy.
-            // Proxy holds weak Self.
-            // Cycle broken.
+            let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+            CVDisplayLinkSetOutputCallback(displayLink, displayLinkOutputCallback, selfPtr)
+            CVDisplayLinkStart(displayLink)
+            self.displayLink = displayLink
         }
         
         Task {
@@ -179,7 +183,9 @@ final class DirectRenderer: NSObject {
             }
         }
         
-        displayLink?.isPaused = false
+        if let displayLink = displayLink {
+            CVDisplayLinkStart(displayLink)
+        }
         
         return true
     }
@@ -187,20 +193,23 @@ final class DirectRenderer: NSObject {
     func stopCapture() {
         guard isCapturing else { return }
         
-        displayLink?.isPaused = true
-        displayLink?.invalidate()
+        if let displayLink = displayLink {
+            CVDisplayLinkStop(displayLink)
+        }
         displayLink = nil
         
         Task {
             try? await captureStream?.stopCapture()
-            self.captureStream = nil
-            self.streamOutput = nil
-            self.isCapturing = false
-            self.metalEngine.reset()
-            
-            self.queueLock.lock()
-            self.frameQueue.removeAll()
-            self.queueLock.unlock()
+            await MainActor.run {
+                self.captureStream = nil
+                self.streamOutput = nil
+                self.isCapturing = false
+                self.metalEngine.reset()
+                
+                self.queueLock.lock()
+                self.frameQueue.removeAll()
+                self.queueLock.unlock()
+            }
         }
     }
     
@@ -370,7 +379,9 @@ final class DirectRenderer: NSObject {
     }
     
     func detachWindow() {
-        displayLink?.isPaused = true
+        if let displayLink = displayLink {
+            CVDisplayLinkStop(displayLink)
+        }
         mtkView = nil
         overlayManager?.destroyOverlay()
     }
@@ -449,27 +460,7 @@ extension DirectRenderer: MTKViewDelegate {
     nonisolated func draw(in view: MTKView) {}
 }
 
-@available(macOS 15.0, *)
-private class DisplayLinkProxy {
-    weak var target: DirectRenderer?
-    
-    init(target: DirectRenderer) {
-        self.target = target
-    }
-    
-    @objc func callback(_ displayLink: CADisplayLink) {
-        // Prevent race condition: Check if target exists fast
-        guard let t = target else {
-            displayLink.invalidate()
-            return
-        }
-        
-        // Dispatch to MainActor to match DirectRenderer requirement
-        Task { @MainActor [weak t] in
-            t?.displayLinkCallback(displayLink)
-        }
-    }
-}
+
 
 @available(macOS 15.0, *)
 private class StreamOutput: NSObject, SCStreamOutput {
