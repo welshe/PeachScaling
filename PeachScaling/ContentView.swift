@@ -10,7 +10,7 @@ let TEXT_COLOR = Color.white.opacity(0.9)
 @available(macOS 15.0, *)
 struct ContentView: View {
 
-    @StateObject var settings = CaptureSettings.shared
+    @StateObject var settings = CaptureSettings()
 
     @State private var countdown = 5
     @State private var isCountingDown = false
@@ -396,7 +396,9 @@ struct ContentView: View {
 
     private func startPermissionTimer() {
         permTimer?.invalidate()
-        permTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+        // Reduced frequency and check activity to save resources
+        permTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { _ in
+            guard NSApp.isActive else { return }
             axGranted = AXIsProcessTrusted()
             recGranted = CGPreflightScreenCaptureAccess()
         }
@@ -404,7 +406,7 @@ struct ContentView: View {
 
     private func startStatsTimer() {
         statsTimer?.invalidate()
-        statsTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [self] _ in
+        statsTimer = Timer.scheduledTimer(withTimeInterval: AppConstants.statsUpdateInterval, repeats: true) { [self] _ in
             Task { @MainActor in
                 guard let renderer = directRenderer else { return }
                 
@@ -449,12 +451,14 @@ struct ContentView: View {
         let opts: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         // Helper to parse bounds robustly
         let parseBounds: ([String: Any]) -> CGRect? = { dict in
-            let parseValue: (String) -> CGFloat = { key in
+            let parseValue: (String) -> CGFloat? = { key in
                 if let val = dict[key] as? CGFloat { return val }
                 if let val = dict[key] as? Int { return CGFloat(val) }
-                return 0
+                return nil
             }
-            return CGRect(x: parseValue("X"), y: parseValue("Y"), width: parseValue("Width"), height: parseValue("Height"))
+            guard let x = parseValue("X"), let y = parseValue("Y"),
+                  let w = parseValue("Width"), let h = parseValue("Height") else { return nil }
+            return CGRect(x: x, y: y, width: w, height: h)
         }
 
         guard let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]],
