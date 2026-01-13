@@ -372,7 +372,7 @@ struct ContentView: View {
         
         renderer.configure(
             from: settings,
-            targetFPS: 120,
+            targetFPS: settings.effectiveTargetFPS,
             sourceSize: sourceSize,
             outputSize: outputSize
         )
@@ -498,7 +498,7 @@ struct ContentView: View {
 
         renderer.configure(
             from: settings,
-            targetFPS: 120,
+            targetFPS: settings.effectiveTargetFPS,
             sourceSize: sourceSize,
             outputSize: outputSize
         )
