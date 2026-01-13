@@ -183,7 +183,6 @@ final class CaptureSettings: ObservableObject {
     @Published var showMGHUD: Bool = true
     @Published var vsync: Bool = true
     @Published var sharpening: Float = 0.5
-    @Published var temporalBlend: Float = 0.1
     @Published var motionScale: Float = 1.0
     
     var effectiveUpscaleFactor: Float {
