@@ -173,9 +173,7 @@ final class OverlayWindowManager: ObservableObject {
         
         windowUpdateTimer?.invalidate()
         windowUpdateTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.updateWindowPosition()
-            }
+            self?.updateWindowPosition()
         }
         
         if let observer = appObserver {
@@ -187,16 +185,14 @@ final class OverlayWindowManager: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] notification in
-            Task { @MainActor in
-                guard let self = self else { return }
-                guard self.targetPID != 0 else { return }
-                guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
-                
-                if app.processIdentifier == self.targetPID {
-                    self.overlayWindow?.orderFrontRegardless()
-                } else {
-                    self.overlayWindow?.orderOut(nil)
-                }
+            guard let self = self else { return }
+            guard self.targetPID != 0 else { return }
+            guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            
+            if app.processIdentifier == self.targetPID {
+                self.overlayWindow?.orderFrontRegardless()
+            } else {
+                self.overlayWindow?.orderOut(nil)
             }
         }
     }
