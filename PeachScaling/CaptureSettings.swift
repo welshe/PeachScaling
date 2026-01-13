@@ -95,6 +95,13 @@ final class CaptureSettings: ObservableObject {
         case mgfg1 = "MGFG-1"
         
         var id: String { rawValue }
+        
+        var description: String {
+             switch self {
+             case .off: return "Lowest latency, no extra frames"
+             case .mgfg1: return "Optical-flow generation"
+             }
+        }
     }
     
     enum FrameGenType: String, CaseIterable, Identifiable {
