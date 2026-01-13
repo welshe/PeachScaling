@@ -413,14 +413,17 @@ struct ContentView: View {
         statsTimer?.invalidate()
         statsTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [self] _ in
             Task { @MainActor in
-                if let renderer = directRenderer {
-                    currentFPS = renderer.currentFPS
-                    interpolatedFPS = renderer.interpolatedFPS
-                    processingTime = renderer.processingTime
-                    if settings.showMGHUD {
-                        let stats = renderer.getStats()
-                        hudController.update(stats: stats, settings: settings)
-                    }
+                guard let renderer = directRenderer else { return }
+                
+                // Always update basic FPS state for UI (optional, but good for main window)
+                currentFPS = renderer.currentFPS
+                interpolatedFPS = renderer.interpolatedFPS
+                processingTime = renderer.processingTime
+                
+                // Only do heavy stats retrieval/HUD update if visible
+                if settings.showMGHUD {
+                    let stats = renderer.getStats()
+                    hudController.update(stats: stats, settings: settings)
                 }
             }
         }
@@ -451,19 +454,25 @@ struct ContentView: View {
         }
 
         let opts: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        // Helper to parse bounds robustly
+        let parseBounds: ([String: Any]) -> CGRect? = { dict in
+            let parseValue: (String) -> CGFloat = { key in
+                if let val = dict[key] as? CGFloat { return val }
+                if let val = dict[key] as? Int { return CGFloat(val) }
+                return 0
+            }
+            return CGRect(x: parseValue("X"), y: parseValue("Y"), width: parseValue("Width"), height: parseValue("Height"))
+        }
+
         guard let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]],
               let targetInfo = list.first(where: { ($0[kCGWindowOwnerPID as String] as? Int32) == app.processIdentifier }),
               let wid = targetInfo[kCGWindowNumber as String] as? CGWindowID,
-              let bounds = targetInfo[kCGWindowBounds as String] as? [String: CGFloat] else {
+              let boundsDict = targetInfo[kCGWindowBounds as String] as? [String: Any],
+              let frame = parseBounds(boundsDict) else {
             alertMessage = "Target window not found. Ensure the window is visible."
             showAlert = true
             return
         }
-
-        let frame = CGRect(x: bounds["X"] ?? 0,
-                           y: bounds["Y"] ?? 0,
-                           width: bounds["Width"] ?? 100,
-                           height: bounds["Height"] ?? 100)
 
         guard let screen = NSScreen.main else { return }
         let screenH = screen.frame.height
