@@ -154,15 +154,20 @@ struct MGHUDView: View {
         let totalMB = Double(data.gpuMemoryTotal) / (1024.0 * 1024.0)
         let textureMB = Double(data.textureMemory) / (1024.0 * 1024.0)
         
-        let effectiveUsed = usedMB > 0.1 ? usedMB : textureMB
-        let effectiveTotal = totalMB > 0.1 ? totalMB : max(textureMB * 8, 1024.0)
-        let percent = effectiveTotal > 0 ? (effectiveUsed / effectiveTotal) * 100 : 0
+        let vramText: String
+        let memoryColor: Color
         
-        let vramText: String = effectiveUsed >= 1.0
-            ? String(format: "%.0f / %.0f MB (%.0f%%)", effectiveUsed, effectiveTotal, percent)
-            : String(format: "%.1f KB", effectiveUsed * 1024.0)
-        
-        let memoryColor: Color = percent > 90 ? .red : (percent > 75 ? .orange : (percent > 50 ? .yellow : .white))
+        if usedMB > 0.1 && totalMB > 0.1 {
+            let percent = (usedMB / totalMB) * 100
+            vramText = String(format: "%.0f / %.0f MB (%.0f%%)", usedMB, totalMB, percent)
+            memoryColor = percent > 90 ? .red : (percent > 75 ? .orange : (percent > 50 ? .yellow : .white))
+        } else if textureMB > 0.1 {
+            vramText = String(format: "%.0f MB", textureMB)
+            memoryColor = .white
+        } else {
+            vramText = "N/A"
+            memoryColor = .gray
+        }
         
         return HUDRow(label: "VRAM", value: vramText, compact: isCompact, color: memoryColor)
     }
