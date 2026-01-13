@@ -35,14 +35,14 @@ final class DirectRenderer: NSObject {
     private let lastDrawnFrameLock = NSLock()
     private var interpolationPhase: Float = 0.0
     
-    // Constants
-    private let kMaxQueueSize = 5
-    private let kStatsUpdateInterval: TimeInterval = 0.25
-    private let kStreamTimeScale: Int32 = 60
-    private let kDisplayLinkPreferredFPS: Int = 120
+    // Constants - Using AppConstants
+    private let kMaxQueueSize = AppConstants.ringBufferCapacity
+
     
     var onWindowLost: (() -> Void)?
     var onWindowMoved: ((CGRect) -> Void)?
+    var onWarning: ((String) -> Void)?
+
     
     private(set) var currentFPS: Float = 0
     private(set) var interpolatedFPS: Float = 0
@@ -72,6 +72,10 @@ final class DirectRenderer: NSObject {
         self.device = dev
         self.commandQueue = queue
         self.metalEngine = engine
+        engine.onWarning = { [weak self] msg in
+            self?.onWarning?(msg)
+        }
+
         
         super.init()
         
@@ -146,7 +150,7 @@ final class DirectRenderer: NSObject {
                 let config = SCStreamConfiguration()
                 config.width = Int(window.frame.width)
                 config.height = Int(window.frame.height)
-                config.minimumFrameInterval = CMTime(value: 1, timescale: kStreamTimeScale)
+                config.minimumFrameInterval = CMTime(value: 1, timescale: AppConstants.streamTimeScale)
                 config.pixelFormat = kCVPixelFormatType_32BGRA
                 config.queueDepth = 5
                 config.showsCursor = currentSettings?.captureCursor ?? true
@@ -157,11 +161,29 @@ final class DirectRenderer: NSObject {
                 }
                 
                 try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: captureQueue)
-                try await stream.startCapture()
                 
-                self.captureStream = stream
-                self.streamOutput = output
-                self.isCapturing = true
+                // Retry logic for startCapture
+                var success = false
+                for i in 0..<3 {
+                    do {
+                        try await stream.startCapture()
+                        success = true
+                        break
+                    } catch {
+                        if i < 2 {
+                            let backoff = UInt64(pow(2.0, Double(i))) * 500_000_000
+                            try? await Task.sleep(nanoseconds: backoff)
+                        } else {
+                            throw error
+                        }
+                    }
+                }
+                
+                if success {
+                    self.captureStream = stream
+                    self.streamOutput = output
+                    self.isCapturing = true
+                }
                 
             } catch {
                 NSLog("DirectRenderer: Stream capture failed: \(error)")
@@ -192,6 +214,10 @@ final class DirectRenderer: NSObject {
                 self.queueLock.lock()
                 self.frameQueue.removeAll()
                 self.queueLock.unlock()
+                
+                self.lastDrawnFrameLock.lock()
+                self.lastDrawnFrame = nil
+                self.lastDrawnFrameLock.unlock()
             }
         }
     }
@@ -199,7 +225,7 @@ final class DirectRenderer: NSObject {
     func pauseCapture() { isCapturing = false }
     func resumeCapture() { isCapturing = true }
     
-    private func processCapturedFrame(_ sampleBuffer: CMSampleBuffer) {
+    nonisolated private func processCapturedFrame(_ sampleBuffer: CMSampleBuffer) {
         autoreleasepool {
             guard isCapturing, sampleBuffer.isValid,
                   let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
@@ -219,19 +245,29 @@ final class DirectRenderer: NSObject {
     private func renderLoopInternal() {
         guard let settings = currentSettings else { return }
         
-        var frameToRender: MTLTexture? = nil
-        var interpolationT: Float = 1.0
-        var previousFrame: MTLTexture? = nil
+        let selection = selectFrameForRendering(settings: settings)
+        guard let target = selection.current else { return }
         
+        lastDrawnFrameLock.lock()
+        lastDrawnFrame = target
+        lastDrawnFrameLock.unlock()
+        
+        submitRenderCommand(current: target, previous: selection.previous, t: selection.t, settings: settings)
+    }
+    
+    private func selectFrameForRendering(settings: CaptureSettings) -> (current: MTLTexture?, previous: MTLTexture?, t: Float) {
         queueLock.lock()
+        defer { queueLock.unlock() }
+        
+        var frameToRender: MTLTexture? = nil
+        var previousFrame: MTLTexture? = nil
+        var interpolationT: Float = 1.0
         
         if settings.isFrameGenEnabled {
             if frameQueue.count >= 2 {
-                // Peek at first two frames without removing yet
                 guard let frameA = frameQueue.peek(at: 0),
                       let frameB = frameQueue.peek(at: 1) else { 
-                    queueLock.unlock()
-                    return 
+                    return (nil, nil, 1.0)
                 }
                 
                 let step = 1.0 / Float(settings.frameGenMultiplier.intValue)
@@ -239,7 +275,7 @@ final class DirectRenderer: NSObject {
                 
                 if interpolationPhase >= 1.0 {
                     interpolationPhase -= 1.0
-                    _ = frameQueue.pop() // Remove oldest frame
+                    _ = frameQueue.pop()
                     
                     if frameQueue.count >= 2 {
                         previousFrame = frameQueue.peek(at: 0)?.texture
@@ -274,24 +310,20 @@ final class DirectRenderer: NSObject {
             interpolationT = 1.0
         }
         
-        queueLock.unlock()
-        
-        guard let target = frameToRender else { return }
-        
-        lastDrawnFrameLock.lock()
-        lastDrawnFrame = target
-        lastDrawnFrameLock.unlock()
-        
+        return (frameToRender, previousFrame, interpolationT)
+    }
+    
+    private func submitRenderCommand(current: MTLTexture, previous: MTLTexture?, t: Float, settings: CaptureSettings) {
         guard let commandBuffer = commandQueue.makeCommandBuffer() else { return }
         commandBuffer.label = "Render Loop"
         
         let startTime = CACurrentMediaTime()
         
         let processed = metalEngine.processFrame(
-            current: target,
-            previous: previousFrame,
+            current: current,
+            previous: previous,
             motionVectors: nil,
-            t: interpolationT,
+            t: t,
             settings: settings,
             commandBuffer: commandBuffer
         )
@@ -299,7 +331,7 @@ final class DirectRenderer: NSObject {
         if let finalTexture = processed, let view = mtkView, let drawable = view.currentDrawable {
             if metalEngine.renderToDrawable(texture: finalTexture, drawable: drawable, commandBuffer: commandBuffer) {
                 interpolatedFrameCount += 1
-                if interpolationT >= 0.99 || interpolationT == 0.0 {
+                if t >= 0.99 || t == 0.0 {
                     frameCount += 1
                 }
             }
@@ -307,14 +339,6 @@ final class DirectRenderer: NSObject {
         
         commandBuffer.addCompletedHandler { [weak self] _ in
             self?.processingTime = (CACurrentMediaTime() - startTime) * 1000.0
-            
-            // Should release any manually retained textures here if we were holding them manually
-            // Since we use ARC for MTLTexture in Swift, capturing 'target' and 'previousFrame' 
-            // in the command buffer closure (if we did) would keep them alive.
-            // Currently 'processed' and 'finalTexture' are local. 
-            // The command buffer holds strong references to resources it uses until completion.
-            // So we are safe provided we don't overwrite the backing IOSurface too fast.
-            // Keeping them in 'frameQueue' until consumed + 'lastDrawnFrame' helps.
         }
         
         commandBuffer.commit()
@@ -377,7 +401,7 @@ final class DirectRenderer: NSObject {
         }
         
         let elapsed = now - fpsTimer
-        if elapsed >= kStatsUpdateInterval { // Use new constant
+        if elapsed >= AppConstants.statsUpdateInterval {
             let realFrameDelta = frameCount - lastReportedFrameCount
             let interpFrameDelta = interpolatedFrameCount - lastReportedInterpCount
             
@@ -510,10 +534,13 @@ struct RingBuffer<T> {
     }
     
     mutating func removeAll() {
+        // Explicitly clear references to avoid memory leaks
+        for i in 0..<array.count {
+            array[i] = nil
+        }
         head = 0
         tail = 0
         countInternal = 0
-        array = [T?](repeating: nil, count: capacity)
     }
     
     func peek(at offset: Int) -> T? {
