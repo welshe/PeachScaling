@@ -80,6 +80,7 @@ final class DirectRenderer: NSObject {
     private var settingsUpdatePending = false
     private var pendingConfig: (() -> Void)?
     
+    @MainActor
     init?(device: MTLDevice? = nil, commandQueue: MTLCommandQueue? = nil) {
         let dev = device ?? MTLCreateSystemDefaultDevice()
         guard let dev, let queue = commandQueue ?? dev.makeCommandQueue(), let engine = MetalEngine(device: dev) else { return nil }
@@ -91,7 +92,6 @@ final class DirectRenderer: NSObject {
             self?.onWarning?(msg)
         }
 
-        
         super.init()
         
         guard let overlay = OverlayWindowManager(device: dev) else { return nil }
@@ -198,9 +198,7 @@ final class DirectRenderer: NSObject {
                     self.captureStream = stream
                     self.streamOutput = output
                     
-                    self.queueLock.lock()
-                    self._isCapturing = true
-                    self.queueLock.unlock()
+                    self.setCapturingState(true)
                 }
                 
             } catch {
@@ -227,9 +225,7 @@ final class DirectRenderer: NSObject {
                 self.captureStream = nil
                 self.streamOutput = nil
                 
-                self.queueLock.lock()
-                self._isCapturing = false
-                self.queueLock.unlock()
+                self.setCapturingState(false)
                 
                 self.metalEngine.reset()
                 
@@ -244,8 +240,15 @@ final class DirectRenderer: NSObject {
         }
     }
     
-    func pauseCapture() { isCapturing = false }
-    func resumeCapture() { isCapturing = true }
+    func pauseCapture() { setCapturingState(false) }
+    func resumeCapture() { setCapturingState(true) }
+    
+    // Helper to safely mutate capturing state without lock warnings in async contexts
+    private func setCapturingState(_ value: Bool) {
+        queueLock.lock()
+        _isCapturing = value
+        queueLock.unlock()
+    }
     
     nonisolated private func processCapturedFrame(_ sampleBuffer: CMSampleBuffer) {
         autoreleasepool {
@@ -346,7 +349,7 @@ final class DirectRenderer: NSObject {
         return (frameToRender, previousFrame, interpolationT)
     }
     
-    private func submitRenderCommand(current: MTLTexture, previous: MTLTexture?, t: Float, settings: CaptureSettings) {
+    @MainActor private func submitRenderCommand(current: MTLTexture, previous: MTLTexture?, t: Float, settings: CaptureSettings) {
         guard let commandBuffer = commandQueue.makeCommandBuffer() else { return }
         commandBuffer.label = "Render Loop"
         
