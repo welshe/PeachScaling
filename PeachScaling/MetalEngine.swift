@@ -25,6 +25,15 @@ struct TAAConstants {
     var textureSize: SIMD2<Float>
 }
 
+// Global Constants for MetalEngine
+enum MetalConstants {
+    static let threadgroupSize = 16
+    static let motionThreadgroupSize = 8
+    static let taaModulation: Float = 0.1
+    static let aaThreshold: Float = 0.1
+    static let aaSubpixelBlend: Float = 0.75
+}
+
 @available(macOS 15.0, *)
 final class MetalEngine {
     
@@ -319,8 +328,8 @@ final class MetalEngine {
         encoder.setTexture(previous, index: 1)
         encoder.setTexture(output, index: 2)
         
-        let threads = MTLSize(width: (finalWidth + 7) / 8, height: (finalHeight + 7) / 8, depth: 1)
-        encoder.dispatchThreadgroups(threads, threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
+        let threads = MTLSize(width: (finalWidth + MetalConstants.motionThreadgroupSize - 1) / MetalConstants.motionThreadgroupSize, height: (finalHeight + MetalConstants.motionThreadgroupSize - 1) / MetalConstants.motionThreadgroupSize, depth: 1)
+        encoder.dispatchThreadgroups(threads, threadsPerThreadgroup: MTLSize(width: MetalConstants.motionThreadgroupSize, height: MetalConstants.motionThreadgroupSize, depth: 1))
         encoder.endEncoding()
         
         return output
@@ -346,8 +355,8 @@ final class MetalEngine {
             var constants = InterpolationConstants(interpolationFactor: t, motionScale: settings.motionScale, textureSize: SIMD2<Float>(Float(current.width), Float(current.height)))
             encoder.setBytes(&constants, length: MemoryLayout<InterpolationConstants>.size, index: 0)
             
-            let threads = MTLSize(width: (current.width + 15) / 16, height: (current.height + 15) / 16, depth: 1)
-            encoder.dispatchThreadgroups(threads, threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+            let threads = MTLSize(width: (current.width + MetalConstants.threadgroupSize - 1) / MetalConstants.threadgroupSize, height: (current.height + MetalConstants.threadgroupSize - 1) / MetalConstants.threadgroupSize, depth: 1)
+            encoder.dispatchThreadgroups(threads, threadsPerThreadgroup: MTLSize(width: MetalConstants.threadgroupSize, height: MetalConstants.threadgroupSize, depth: 1))
             encoder.endEncoding()
             
             return output
@@ -364,8 +373,8 @@ final class MetalEngine {
         var tValue = t
         encoder.setBytes(&tValue, length: MemoryLayout<Float>.size, index: 0)
         
-        let threads = MTLSize(width: (current.width + 15) / 16, height: (current.height + 15) / 16, depth: 1)
-        encoder.dispatchThreadgroups(threads, threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+        let threads = MTLSize(width: (current.width + MetalConstants.threadgroupSize - 1) / MetalConstants.threadgroupSize, height: (current.height + MetalConstants.threadgroupSize - 1) / MetalConstants.threadgroupSize, depth: 1)
+        encoder.dispatchThreadgroups(threads, threadsPerThreadgroup: MTLSize(width: MetalConstants.threadgroupSize, height: MetalConstants.threadgroupSize, depth: 1))
         encoder.endEncoding()
         
         return output
@@ -381,9 +390,13 @@ final class MetalEngine {
                 historyTexture = device.makeTexture(descriptor: desc)
                 
                 // Initialize history with current frame to avoid black/garbage startup
-                if let hist = historyTexture, let blit = commandBuffer.makeBlitCommandEncoder() {
-                     blit.copy(from: texture, to: hist)
-                     blit.endEncoding()
+                if let hist = historyTexture {
+                    if let blit = commandBuffer.makeBlitCommandEncoder() {
+                        blit.copy(from: texture, to: hist)
+                        blit.endEncoding()
+                    } else {
+                        NSLog("MetalEngine: Failed to create blit encoder for TAA history init")
+                    }
                 }
             }
             
@@ -400,17 +413,19 @@ final class MetalEngine {
             encoder.setTexture(motionVectors, index: 2)
             encoder.setTexture(output, index: 3)
             
-            var constants = TAAConstants(modulation: 0.1, textureSize: SIMD2<Float>(Float(texture.width), Float(texture.height)))
+            var constants = TAAConstants(modulation: MetalConstants.taaModulation, textureSize: SIMD2<Float>(Float(texture.width), Float(texture.height)))
             encoder.setBytes(&constants, length: MemoryLayout<TAAConstants>.size, index: 0)
             
-            let threads = MTLSize(width: (texture.width + 15) / 16, height: (texture.height + 15) / 16, depth: 1)
-            encoder.dispatchThreadgroups(threads, threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+            let threads = MTLSize(width: (texture.width + MetalConstants.threadgroupSize - 1) / MetalConstants.threadgroupSize, height: (texture.height + MetalConstants.threadgroupSize - 1) / MetalConstants.threadgroupSize, depth: 1)
+            encoder.dispatchThreadgroups(threads, threadsPerThreadgroup: MTLSize(width: MetalConstants.threadgroupSize, height: MetalConstants.threadgroupSize, depth: 1))
             encoder.endEncoding()
             
             // Update History: Copy output to history for next frame
             if let blit = commandBuffer.makeBlitCommandEncoder() {
                 blit.copy(from: output, to: history)
                 blit.endEncoding()
+            } else {
+                 NSLog("MetalEngine: Failed to create blit encoder for TAA history update")
             }
             
             return output
@@ -434,11 +449,11 @@ final class MetalEngine {
         encoder.setTexture(texture, index: 0)
         encoder.setTexture(output, index: 1)
         
-        var constants = AAConstants(threshold: 0.1, subpixelBlend: 0.75)
+        var constants = AAConstants(threshold: MetalConstants.aaThreshold, subpixelBlend: MetalConstants.aaSubpixelBlend)
         encoder.setBytes(&constants, length: MemoryLayout<AAConstants>.size, index: 0)
         
-        let threads = MTLSize(width: (texture.width + 15) / 16, height: (texture.height + 15) / 16, depth: 1)
-        encoder.dispatchThreadgroups(threads, threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+        let threads = MTLSize(width: (texture.width + MetalConstants.threadgroupSize - 1) / MetalConstants.threadgroupSize, height: (texture.height + MetalConstants.threadgroupSize - 1) / MetalConstants.threadgroupSize, depth: 1)
+        encoder.dispatchThreadgroups(threads, threadsPerThreadgroup: MTLSize(width: MetalConstants.threadgroupSize, height: MetalConstants.threadgroupSize, depth: 1))
         encoder.endEncoding()
         
         return output
@@ -478,8 +493,8 @@ final class MetalEngine {
         encoder.setTexture(texture, index: 0)
         encoder.setTexture(output, index: 1)
         
-        let threads = MTLSize(width: (Int(outputSize.width) + 15) / 16, height: (Int(outputSize.height) + 15) / 16, depth: 1)
-        encoder.dispatchThreadgroups(threads, threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+        let threads = MTLSize(width: (Int(outputSize.width) + MetalConstants.threadgroupSize - 1) / MetalConstants.threadgroupSize, height: (Int(outputSize.height) + MetalConstants.threadgroupSize - 1) / MetalConstants.threadgroupSize, depth: 1)
+        encoder.dispatchThreadgroups(threads, threadsPerThreadgroup: MTLSize(width: MetalConstants.threadgroupSize, height: MetalConstants.threadgroupSize, depth: 1))
         encoder.endEncoding()
         
         return output
@@ -504,8 +519,8 @@ final class MetalEngine {
         var constants = SharpenConstants(sharpness: intensity, radius: 1.0)
         encoder.setBytes(&constants, length: MemoryLayout<SharpenConstants>.size, index: 0)
         
-        let threads = MTLSize(width: (texture.width + 15) / 16, height: (texture.height + 15) / 16, depth: 1)
-        encoder.dispatchThreadgroups(threads, threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+        let threads = MTLSize(width: (texture.width + MetalConstants.threadgroupSize - 1) / MetalConstants.threadgroupSize, height: (texture.height + MetalConstants.threadgroupSize - 1) / MetalConstants.threadgroupSize, depth: 1)
+        encoder.dispatchThreadgroups(threads, threadsPerThreadgroup: MTLSize(width: MetalConstants.threadgroupSize, height: MetalConstants.threadgroupSize, depth: 1))
         encoder.endEncoding()
         
         return output
