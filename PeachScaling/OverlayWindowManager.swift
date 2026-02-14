@@ -12,7 +12,7 @@ struct OverlayWindowConfig {
     var vsyncEnabled: Bool
     var adaptiveSyncEnabled: Bool
     var passThrough: Bool
-    
+
     static var `default`: OverlayWindowConfig {
         OverlayWindowConfig(
             targetScreen: NSScreen.main,
@@ -33,7 +33,7 @@ final class OverlayWindowManager: ObservableObject {
     @Published private(set) var currentSize: CGSize = .zero
     @Published private(set) var currentFPS: Double = 0.0
     @Published private(set) var lastError: String?
-    
+
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private var textureCache: CVMetalTextureCache?
@@ -46,7 +46,7 @@ final class OverlayWindowManager: ObservableObject {
     private var targetPID: pid_t = 0
     private var appObserver: Any?
     private var windowUpdateTimer: Timer?
-    
+
     init?(device: MTLDevice? = nil) {
         guard let dev = device ?? MTLCreateSystemDefaultDevice() else {
             return nil
@@ -56,39 +56,33 @@ final class OverlayWindowManager: ObservableObject {
         }
         self.device = dev
         self.commandQueue = queue
-        
+
         var cache: CVMetalTextureCache?
         let status = CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, dev, nil, &cache)
         if status == kCVReturnSuccess {
             self.textureCache = cache
         }
     }
-    
+
     deinit {
-        // Ensure timer is invalidated on deinit
         windowUpdateTimer?.invalidate()
-        windowUpdateTimer = nil
-        
         if let observer = appObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
     }
-    
+
     func createOverlay(config: OverlayWindowConfig = .default) -> Bool {
-        // First destroy any existing overlay
-        Task { @MainActor in
-            self.destroyOverlayInternal()
-        }
-        
+        destroyOverlay()
+
         let targetScreen = config.targetScreen ?? NSScreen.main ?? NSScreen.screens.first
         guard let screen = targetScreen else {
             lastError = "No screen available"
             return false
         }
-        
+
         let frame = config.windowFrame ?? screen.frame
         currentSize = frame.size
-        
+
         let window = NSWindow(
             contentRect: frame,
             styleMask: [.borderless],
@@ -96,7 +90,7 @@ final class OverlayWindowManager: ObservableObject {
             defer: false,
             screen: screen
         )
-        
+
         window.isReleasedWhenClosed = false
         window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.maximumWindow)))
         window.backgroundColor = .clear
@@ -105,21 +99,21 @@ final class OverlayWindowManager: ObservableObject {
         window.ignoresMouseEvents = config.passThrough
         window.acceptsMouseMovedEvents = !config.passThrough
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .fullScreenPrimary, .stationary]
-        
+
         overlayWindow = window
         window.orderFrontRegardless()
-        
+
         isActive = true
         lastError = nil
         return true
     }
-    
+
     func setMTKView(_ view: MTKView) {
         guard let window = overlayWindow else { return }
         view.frame = window.contentView?.bounds ?? CGRect(origin: .zero, size: currentSize)
         window.contentView = view
         mtkView = view
-        
+
         if let screen = window.screen ?? NSScreen.main {
             let scale = screen.backingScaleFactor
             view.drawableSize = CGSize(
@@ -128,18 +122,11 @@ final class OverlayWindowManager: ObservableObject {
             )
         }
     }
-    
+
     func destroyOverlay() {
-        Task { @MainActor in
-            self.destroyOverlayInternal()
-        }
-    }
-    
-    @MainActor
-    private func destroyOverlayInternal() {
         windowUpdateTimer?.invalidate()
         windowUpdateTimer = nil
-        
+
         if let observer = appObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
             appObserver = nil
@@ -150,22 +137,26 @@ final class OverlayWindowManager: ObservableObject {
         isActive = false
         currentSize = .zero
     }
-    
+
     func createTexture(from pixelBuffer: CVPixelBuffer) -> MTLTexture? {
         guard let cache = textureCache else { return nil }
-        
+
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
         let pixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer)
-        
+
         let mtlPixelFormat: MTLPixelFormat
-               case kCVPixelFormatType_32BGRA: mtlPixelFormat = .bgra switch pixelFormat {
-8Unorm
-        case kCVPixelFormatType_32RGBA: mtlPixelFormat = .rgba8Unorm
-        case kCVPixelFormatType_64RGBAHalf: mtlPixelFormat = .rgba16Float
-        default: mtlPixelFormat = .bgra8Unorm
+        switch pixelFormat {
+        case kCVPixelFormatType_32BGRA:
+            mtlPixelFormat = .bgra8Unorm
+        case kCVPixelFormatType_32RGBA:
+            mtlPixelFormat = .rgba8Unorm
+        case kCVPixelFormatType_64RGBAHalf:
+            mtlPixelFormat = .rgba16Float
+        default:
+            mtlPixelFormat = .bgra8Unorm
         }
-        
+
         var cvTexture: CVMetalTexture?
         let status = CVMetalTextureCacheCreateTextureFromImage(
             kCFAllocatorDefault, cache, pixelBuffer, nil, mtlPixelFormat, width, height, 0, &cvTexture
@@ -173,39 +164,39 @@ final class OverlayWindowManager: ObservableObject {
         guard status == kCVReturnSuccess, let cvTex = cvTexture else { return nil }
         return CVMetalTextureGetTexture(cvTex)
     }
-    
+
     func flushTextureCache() {
         if let cache = textureCache {
             CVMetalTextureCacheFlush(cache, 0)
         }
     }
-    
+
     func setTargetWindow(_ windowID: CGWindowID, pid: pid_t) {
         targetWindowID = windowID
         targetPID = pid
-        
+
         windowUpdateTimer?.invalidate()
         windowUpdateTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.updateWindowPosition()
             }
         }
-        
+
         if let observer = appObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
-        
+
         appObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
             queue: .main
         ) { [weak self] notification in
             guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
-            
+
             Task { @MainActor in
                 guard let self = self else { return }
                 guard self.targetPID != 0 else { return }
-                
+
                 if app.processIdentifier == self.targetPID {
                     self.overlayWindow?.orderFrontRegardless()
                 } else {
@@ -214,52 +205,52 @@ final class OverlayWindowManager: ObservableObject {
             }
         }
     }
-    
+
     func updateWindowPosition() {
         guard targetWindowID != 0 else { return }
         guard let window = overlayWindow else { return }
-        
+
         let opts: CGWindowListOption = [.optionIncludingWindow]
         guard let list = CGWindowListCopyWindowInfo(opts, targetWindowID) as? [[String: Any]],
               let info = list.first,
               let bounds = info[kCGWindowBounds as String] as? [String: CGFloat] else {
             return
         }
-        
+
         let isOnScreen = info[kCGWindowIsOnscreen as String] as? Bool ?? true
         if !isOnScreen {
             window.orderOut(nil)
             return
         }
-        
+
         let cgFrame = CGRect(
             x: bounds["X"] ?? 0,
             y: bounds["Y"] ?? 0,
             width: bounds["Width"] ?? 100,
             height: bounds["Height"] ?? 100
         )
-        
+
         guard let screen = window.screen ?? NSScreen.main else { return }
         let screenH = screen.frame.height
-        
+
         let nsFrame = CGRect(
             x: cgFrame.origin.x,
             y: screenH - cgFrame.origin.y - cgFrame.height,
             width: cgFrame.width,
             height: cgFrame.height
         )
-        
+
         if !window.isVisible {
             window.orderFront(nil)
         }
-        
+
         if abs(window.frame.origin.x - nsFrame.origin.x) > 1 ||
            abs(window.frame.origin.y - nsFrame.origin.y) > 1 ||
            abs(window.frame.size.width - nsFrame.size.width) > 1 ||
            abs(window.frame.size.height - nsFrame.size.height) > 1 {
-            
+
             window.setFrame(nsFrame, display: false)
-            
+
             if let view = mtkView {
                 view.frame = CGRect(origin: .zero, size: nsFrame.size)
                 view.drawableSize = CGSize(
@@ -270,19 +261,19 @@ final class OverlayWindowManager: ObservableObject {
             currentSize = nsFrame.size
         }
     }
-    
+
     var metalDevice: MTLDevice { device }
     var metalCommandQueue: MTLCommandQueue { commandQueue }
-    
+
     var drawableSize: CGSize {
         mtkView?.drawableSize ?? .zero
     }
-    
+
     func setVisible(_ visible: Bool) {
         if visible { overlayWindow?.orderFrontRegardless() }
         else { overlayWindow?.orderOut(nil) }
     }
-    
+
     func createTexture(
         width: Int, height: Int,
         pixelFormat: MTLPixelFormat = .rgba16Float,
@@ -295,15 +286,15 @@ final class OverlayWindowManager: ObservableObject {
         desc.storageMode = .private
         return device.makeTexture(descriptor: desc)
     }
-    
+
     func createFlowTexture(width: Int, height: Int) -> MTLTexture? {
         createTexture(width: width, height: height, pixelFormat: .rg16Float, usage: [.shaderRead, .shaderWrite])
     }
-    
+
     func createInterpolatedTexture(width: Int, height: Int) -> MTLTexture? {
         createTexture(width: width, height: height, pixelFormat: .rgba16Float, usage: [.shaderRead, .shaderWrite])
     }
-    
+
     func createOutputTexture(width: Int, height: Int) -> MTLTexture? {
         createTexture(width: width, height: height, pixelFormat: .bgra8Unorm, usage: [.shaderRead, .shaderWrite, .renderTarget])
     }
