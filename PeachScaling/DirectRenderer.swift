@@ -452,53 +452,37 @@ final class DirectRenderer: NSObject {
             
             fpsCounter = 0
             fpsTimer = now
-            
-            // Only update HUD if visual is enabled (optimization)
-            if currentSettings?.showMGHUD != true {
-                // If HUD hidden, we might skip heavy calculation if we had any
-                // But we still need these stats for internal tracking maybe?
-                // User requirement: "Pause stats timer when HUD hidden - Reduce unnecessary CPU usage"
-                // The caller (OverlayWindowManager / ContentView) manages the timer usually.
-                // Wait, logic here is inside getStats().
-                // The TIMER is in DirectRenderer or ContentView?
-                // DirectRenderer doesn't seem to have the timer. OverlayWindowManager didn't have it.
-                // Ah, looking back at User Request, item 9: "DirectRenderer.startStatsTimer...".
-                // ERROR: I don't see `startStatsTimer` in DirectRenderer.swift provided in file view.
-                // Let's check ContentView.swift later? Or maybe I missed it.
-                // Ah, the user request snippet said:
-                // "The stats timer updates every 0.25 seconds regardless of whether the HUD is visible" in startStatsTimer.
-                // I need to find where that is.
-            }
         }
-            var drops: UInt64 = 0
-            
-            self.queueLock.lock()
-            drops = self._droppedFrames
-            self.queueLock.unlock()
-            
-            return DirectEngineStats(
-                fps: interpolatedFPS,
-                interpolatedFPS: interpolatedFPS,
-                captureFPS: currentFPS,
-                frameTime: Float(processingTime),
-                gpuTime: Float(processingTime * 0.8),
-                captureLatency: Float(processingTime * 0.1),
-                presentLatency: Float(processingTime * 0.1),
-                frameCount: frameCount,
-                interpolatedFrameCount: interpolatedFrameCount,
-                droppedFrames: drops,
-                gpuMemoryUsed: 0,
-                gpuMemoryTotal: 0,
-                textureMemoryUsed: 0,
-                renderEncoders: 0,
-                computeEncoders: 0,
-                blitEncoders: 0,
-                commandBuffers: 0,
-                drawCalls: 0,
-                upscaleMode: 0,
-                frameGenMode: 0,
-                aaMode: 0
-            )
+        
+        var drops: UInt64 = 0
+        
+        self.queueLock.lock()
+        drops = self._droppedFrames
+        self.queueLock.unlock()
+        
+        return DirectEngineStats(
+            fps: interpolatedFPS,
+            interpolatedFPS: interpolatedFPS,
+            captureFPS: currentFPS,
+            frameTime: Float(processingTime),
+            gpuTime: Float(processingTime * 0.8),
+            captureLatency: Float(processingTime * 0.1),
+            presentLatency: Float(processingTime * 0.1),
+            frameCount: frameCount,
+            interpolatedFrameCount: interpolatedFrameCount,
+            droppedFrames: drops,
+            gpuMemoryUsed: 0,
+            gpuMemoryTotal: 0,
+            textureMemoryUsed: 0,
+            renderEncoders: 0,
+            computeEncoders: 0,
+            blitEncoders: 0,
+            commandBuffers: 0,
+            drawCalls: 0,
+            upscaleMode: 0,
+            frameGenMode: 0,
+            aaMode: 0
+        )
     }
 }
 
@@ -525,37 +509,57 @@ private class StreamOutput: NSObject, SCStreamOutput {
 }
 
 // MARK: - Ring Buffer
-struct RingBuffer<T> {
+struct RingBuffer<T>: @unchecked Sendable {
     private var array: [T?]
     private var head: Int = 0
     private var tail: Int = 0
     private var countInternal: Int = 0
     let capacity: Int
+    private let lock = NSLock()
     
     init(capacity: Int) {
         self.capacity = capacity
         self.array = [T?](repeating: nil, count: capacity)
     }
     
-    var count: Int { countInternal }
-    var isEmpty: Bool { countInternal == 0 }
-    var isFull: Bool { countInternal == capacity }
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return countInternal
+    }
+    var isEmpty: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return countInternal == 0
+    }
+    var isFull: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return countInternal == capacity
+    }
     
     var first: T? {
-        guard !isEmpty else { return nil }
+        lock.lock()
+        defer { lock.unlock() }
+        guard countInternal > 0 else { return nil }
         return array[head]
     }
     
     var last: T? {
-        guard !isEmpty else { return nil }
+        lock.lock()
+        defer { lock.unlock() }
+        guard countInternal > 0 else { return nil }
         let index = (tail - 1 + capacity) % capacity
         return array[index]
     }
     
     @discardableResult
     mutating func append(_ element: T) -> Bool {
-        let dropped = isFull
-        if isFull {
+        lock.lock()
+        defer { lock.unlock() }
+        
+        let dropped = countInternal == capacity
+        if countInternal == capacity {
             // Overwrite head (drop oldest)
             head = (head + 1) % capacity
             countInternal -= 1
@@ -567,7 +571,10 @@ struct RingBuffer<T> {
     }
     
     mutating func pop() -> T? {
-        guard !isEmpty else { return nil }
+        lock.lock()
+        defer { lock.unlock() }
+        
+        guard countInternal > 0 else { return nil }
         let element = array[head]
         array[head] = nil
         head = (head + 1) % capacity
@@ -576,6 +583,9 @@ struct RingBuffer<T> {
     }
     
     mutating func removeAll() {
+        lock.lock()
+        defer { lock.unlock() }
+        
         // Explicitly clear references to avoid memory leaks
         for i in 0..<array.count {
             array[i] = nil
@@ -586,6 +596,9 @@ struct RingBuffer<T> {
     }
     
     func peek(at offset: Int) -> T? {
+        lock.lock()
+        defer { lock.unlock() }
+        
         guard offset < countInternal else { return nil }
         let index = (head + offset) % capacity
         return array[index]
@@ -593,7 +606,11 @@ struct RingBuffer<T> {
     
     // Conformance helpers
     subscript(index: Int) -> T {
-        get { peek(at: index)! }
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return array[(head + index) % capacity]!
+        }
     }
 }
 
