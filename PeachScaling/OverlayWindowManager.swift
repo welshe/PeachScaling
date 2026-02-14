@@ -65,14 +65,20 @@ final class OverlayWindowManager: ObservableObject {
     }
     
     deinit {
+        // Ensure timer is invalidated on deinit
         windowUpdateTimer?.invalidate()
+        windowUpdateTimer = nil
+        
         if let observer = appObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
     }
     
     func createOverlay(config: OverlayWindowConfig = .default) -> Bool {
-        destroyOverlay()
+        // First destroy any existing overlay
+        Task { @MainActor in
+            self.destroyOverlayInternal()
+        }
         
         let targetScreen = config.targetScreen ?? NSScreen.main ?? NSScreen.screens.first
         guard let screen = targetScreen else {
@@ -124,6 +130,13 @@ final class OverlayWindowManager: ObservableObject {
     }
     
     func destroyOverlay() {
+        Task { @MainActor in
+            self.destroyOverlayInternal()
+        }
+    }
+    
+    @MainActor
+    private func destroyOverlayInternal() {
         windowUpdateTimer?.invalidate()
         windowUpdateTimer = nil
         
@@ -146,8 +159,8 @@ final class OverlayWindowManager: ObservableObject {
         let pixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer)
         
         let mtlPixelFormat: MTLPixelFormat
-        switch pixelFormat {
-        case kCVPixelFormatType_32BGRA: mtlPixelFormat = .bgra8Unorm
+               case kCVPixelFormatType_32BGRA: mtlPixelFormat = .bgra switch pixelFormat {
+8Unorm
         case kCVPixelFormatType_32RGBA: mtlPixelFormat = .rgba8Unorm
         case kCVPixelFormatType_64RGBAHalf: mtlPixelFormat = .rgba16Float
         default: mtlPixelFormat = .bgra8Unorm
