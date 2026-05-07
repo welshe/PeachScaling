@@ -1,6 +1,7 @@
 import SwiftUI
 import MetalKit
 import ApplicationServices
+import CoreGraphics
 
 let BG_COLOR = Color(red: 0.1, green: 0.1, blue: 0.12)
 let PANEL_COLOR = Color(red: 0.15, green: 0.15, blue: 0.18)
@@ -18,6 +19,7 @@ struct ContentView: View {
     @State private var countdownTimer: Timer?
 
     @State private var directRenderer: DirectRenderer?
+    @State private var capturePending = false
 
     @State private var connectedProcessName: String = "-"
     @State private var connectedPID: Int32 = 0
@@ -354,15 +356,19 @@ struct ContentView: View {
     
     private func updateRendererConfig() {
         guard let renderer = directRenderer, isScalingActive else { return }
-        
+
         let scale = NSScreen.main?.backingScaleFactor ?? 2.0
         let userScale = CGFloat(settings.scaleFactor.floatValue)
-        let sourceSize = connectedSize
-        let outputSize = CGSize(
-            width: sourceSize.width * userScale * scale,
-            height: sourceSize.height * userScale * scale
+        let renderScaleMult = CGFloat(settings.renderScale.multiplier)
+        let sourceSize = CGSize(
+            width: connectedSize.width * renderScaleMult,
+            height: connectedSize.height * renderScaleMult
         )
-        
+        let outputSize = CGSize(
+            width: connectedSize.width * userScale * scale,
+            height: connectedSize.height * userScale * scale
+        )
+
         renderer.configure(
             from: settings,
             targetFPS: settings.effectiveTargetFPS,
@@ -391,7 +397,9 @@ struct ContentView: View {
     private func toggleScaling() {
         guard permissionsGranted else { return }
         if isScalingActive { stop() }
-        else { startDirectCapture() }
+        else {
+            Task { @MainActor in await startDirectCapture() }
+        }
     }
 
     private func startPermissionTimer() {
@@ -429,18 +437,22 @@ struct ContentView: View {
         countdown = 5
         countdownTimer?.invalidate()
         countdownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [self] timer in
-            if countdown > 1 { 
-                countdown -= 1 
+            if countdown > 1 {
+                countdown -= 1
             } else {
                 timer.invalidate()
                 countdownTimer = nil
                 isCountingDown = false
-                startDirectCapture()
+                Task { @MainActor in await startDirectCapture() }
             }
         }
     }
     
-    private func startDirectCapture() {
+    private func startDirectCapture() async {
+        guard !capturePending else { return }
+        capturePending = true
+        defer { capturePending = false }
+
         guard let app = NSWorkspace.shared.frontmostApplication,
               app.processIdentifier != NSRunningApplication.current.processIdentifier else {
             alertMessage = "Please switch to the target window before the countdown ends."
@@ -449,7 +461,6 @@ struct ContentView: View {
         }
 
         let opts: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
-        // Helper to parse bounds robustly
         let parseBounds: ([String: Any]) -> CGRect? = { dict in
             let parseValue: (String) -> CGFloat? = { key in
                 if let val = dict[key] as? CGFloat { return val }
@@ -490,16 +501,19 @@ struct ContentView: View {
             return
         }
 
+        let renderScaleMultiplier = CGFloat(settings.renderScale.multiplier)
         let outputFrame = resolvedDisplayFrame(for: nsRect)
-        
+
         let scale = screen.backingScaleFactor
         let userScale = CGFloat(settings.scaleFactor.floatValue)
-        
-        let sourceSize = nsRect.size
-        
+
+        let sourceSize = CGSize(
+            width: nsRect.size.width * renderScaleMultiplier,
+            height: nsRect.size.height * renderScaleMultiplier
+        )
         let outputSize = CGSize(
-            width: sourceSize.width * userScale * scale,
-            height: sourceSize.height * userScale * scale
+            width: nsRect.size.width * userScale * scale,
+            height: nsRect.size.height * userScale * scale
         )
 
         renderer.configure(
@@ -509,38 +523,44 @@ struct ContentView: View {
             outputSize: outputSize
         )
 
-        renderer.attachToScreen(screen, size: sourceSize, windowFrame: nsRect)
+        renderer.attachToScreen(screen, size: nsRect.size, windowFrame: nsRect)
 
-        if renderer.startCapture(windowID: wid, pid: app.processIdentifier) {
-            connectedProcessName = app.localizedName ?? "Unknown"
-            connectedPID = app.processIdentifier
-            connectedWindowID = wid
-            connectedSize = nsRect.size
-
-            NSApp.setActivationPolicy(.accessory)
-            NSApp.deactivate()
-
-            isScalingActive = true
-            startStatsTimer()
-
-            if settings.showMGHUD {
-                hudController.show(compact: false)
-                if let device = MTLCreateSystemDefaultDevice() {
-                    hudController.setDeviceName(device.name)
-                }
-                hudController.setResolutions(capture: nsRect.size, output: outputFrame.size)
-            }
-
-        } else {
+        guard await renderer.startCapture(windowID: wid, pid: app.processIdentifier) else {
             alertMessage = "Failed to start capture. Make sure you have Screen Recording permission."
             showAlert = true
             renderer.detachWindow()
-            // Restore activation policy on failure
             NSApp.setActivationPolicy(.regular)
+            return
+        }
+
+        guard capturePending else {
+            renderer.stopCapture()
+            renderer.detachWindow()
+            return
+        }
+
+        connectedProcessName = app.localizedName ?? "Unknown"
+        connectedPID = app.processIdentifier
+        connectedWindowID = wid
+        connectedSize = nsRect.size
+
+        NSApp.setActivationPolicy(.accessory)
+        NSApp.deactivate()
+
+        isScalingActive = true
+        startStatsTimer()
+
+        if settings.showMGHUD {
+            hudController.show(compact: false)
+            if let device = MTLCreateSystemDefaultDevice() {
+                hudController.setDeviceName(device.name)
+            }
+            hudController.setResolutions(capture: sourceSize, output: outputFrame.size)
         }
     }
 
     func stop() {
+        capturePending = false
         directRenderer?.stopCapture()
         directRenderer?.detachWindow()
         statsTimer?.invalidate()
