@@ -19,8 +19,6 @@ final class DirectRenderer: NSObject {
     private var captureStream: SCStream?
     private var streamOutput: StreamOutput?
     private let captureQueue = DispatchQueue(label: "com.peachscaling.capture", qos: .userInteractive)
-    private let renderQueue = DispatchQueue(label: "com.peachscaling.render", qos: .userInteractive)
-    
     private var displayLink: CADisplayLink?
     
     struct CapturedFrame {
@@ -47,7 +45,14 @@ final class DirectRenderer: NSObject {
     private(set) var currentFPS: Float = 0
     private(set) var interpolatedFPS: Float = 0
     private(set) var processingTime: Double = 0
-    
+
+    private var _gpuTime: Double = 0
+    private let gpuTimeLock = NSLock()
+    private(set) var gpuTime: Double {
+        get { gpuTimeLock.lock(); defer { gpuTimeLock.unlock() }; return _gpuTime }
+        set { gpuTimeLock.lock(); defer { gpuTimeLock.unlock() }; _gpuTime = newValue }
+    }
+
     private var frameCount: UInt64 = 0
     private var interpolatedFrameCount: UInt64 = 0
     
@@ -136,81 +141,62 @@ final class DirectRenderer: NSObject {
         }
     }
     
-    @MainActor func startCapture(windowID: CGWindowID, pid: pid_t = 0) -> Bool {
+    @MainActor func startCapture(windowID: CGWindowID, pid: pid_t = 0) async -> Bool {
         guard !isCapturing else { return false }
-        
+
         targetWindowID = windowID
         targetPID = pid
-        
+
+        let renderScaleMultiplier = currentSettings?.renderScale.multiplier ?? 1.0
+
         if displayLink == nil {
             guard let screen = NSScreen.main else {
                 NSLog("DirectRenderer: No screen available for display link")
-                onWindowLost?()
                 return false
             }
-            
+
             let link = screen.displayLink(target: self, selector: #selector(displayLinkCallback))
             link.add(to: .main, forMode: .common)
             self.displayLink = link
         }
-        
-        Task {
-            do {
-                let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-                guard let window = content.windows.first(where: { $0.windowID == windowID }) else {
-                    onWindowLost?()
-                    return
-                }
-                
-                let filter = SCContentFilter(desktopIndependentWindow: window)
-                let config = SCStreamConfiguration()
-                config.width = Int(window.frame.width)
-                config.height = Int(window.frame.height)
-                config.minimumFrameInterval = CMTime(value: 1, timescale: AppConstants.streamTimeScale)
-                config.pixelFormat = kCVPixelFormatType_32BGRA
-                config.queueDepth = 5
-                config.showsCursor = currentSettings?.captureCursor ?? true
-                
-                let stream = SCStream(filter: filter, configuration: config, delegate: nil)
-                let output = StreamOutput { [weak self] sampleBuffer in
-                    self?.processCapturedFrame(sampleBuffer)
-                }
-                
-                try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: captureQueue)
-                
-                // Retry logic for startCapture
-                var success = false
-                for i in 0..<3 {
-                    do {
-                        try await stream.startCapture()
-                        success = true
-                        break
-                    } catch {
-                        if i < 2 {
-                            let backoff = UInt64(pow(2.0, Double(i))) * 500_000_000
-                            try? await Task.sleep(nanoseconds: backoff)
-                        } else {
-                            throw error
-                        }
-                    }
-                }
-                
-                if success {
-                    self.captureStream = stream
-                    self.streamOutput = output
-                    
-                    self.setCapturingState(true)
-                }
-                
-            } catch {
-                NSLog("DirectRenderer: Stream capture failed: \(error)")
+
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            guard let window = content.windows.first(where: { $0.windowID == windowID }) else {
                 onWindowLost?()
-                return
+                return false
             }
+
+            let filter = SCContentFilter(desktopIndependentWindow: window)
+            let config = SCStreamConfiguration()
+            config.width = max(1, Int(window.frame.width * CGFloat(renderScaleMultiplier)))
+            config.height = max(1, Int(window.frame.height * CGFloat(renderScaleMultiplier)))
+            config.minimumFrameInterval = CMTime(value: 1, timescale: AppConstants.streamTimeScale)
+            config.pixelFormat = kCVPixelFormatType_32BGRA
+            config.queueDepth = 5
+            config.showsCursor = currentSettings?.captureCursor ?? true
+
+            let stream = SCStream(filter: filter, configuration: config, delegate: nil)
+            let output = StreamOutput { [weak self] sampleBuffer in
+                self?.processCapturedFrame(sampleBuffer)
+            }
+
+            try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: captureQueue)
+            try await stream.startCapture()
+
+            captureStream = stream
+            streamOutput = output
+            setCapturingState(true)
+
+        } catch let scError as SCStreamError {
+            NSLog("DirectRenderer: Stream capture failed with SCStreamError: \(scError)")
+            return false
+        } catch {
+            NSLog("DirectRenderer: Stream capture failed: \(error)")
+            return false
         }
-        
+
         displayLink?.isPaused = false
-        
         return true
     }
     
@@ -353,9 +339,14 @@ final class DirectRenderer: NSObject {
     @MainActor private func submitRenderCommand(current: MTLTexture, previous: MTLTexture?, t: Float, settings: CaptureSettings) {
         guard let commandBuffer = commandQueue.makeCommandBuffer() else { return }
         commandBuffer.label = "Render Loop"
-        
-        let startTime = CACurrentMediaTime()
-        
+
+        let cpuStartTime = CACurrentMediaTime()
+        var gpuStartTime: CFTimeInterval = 0
+
+        commandBuffer.addScheduledHandler { _ in
+            gpuStartTime = CACurrentMediaTime()
+        }
+
         let processed = metalEngine.processFrame(
             current: current,
             previous: previous,
@@ -364,7 +355,7 @@ final class DirectRenderer: NSObject {
             settings: settings,
             commandBuffer: commandBuffer
         )
-        
+
         if let finalTexture = processed, let view = mtkView, let drawable = view.currentDrawable {
             if metalEngine.renderToDrawable(texture: finalTexture, drawable: drawable, commandBuffer: commandBuffer) {
                 interpolatedFrameCount += 1
@@ -373,11 +364,15 @@ final class DirectRenderer: NSObject {
                 }
             }
         }
-        
+
         commandBuffer.addCompletedHandler { [weak self] _ in
-            self?.processingTime = (CACurrentMediaTime() - startTime) * 1000.0
+            let cpuElapsed = (CACurrentMediaTime() - cpuStartTime) * 1000.0
+            self?.processingTime = cpuElapsed
+            if gpuStartTime > 0 {
+                self?.gpuTime = (CACurrentMediaTime() - gpuStartTime) * 1000.0
+            }
         }
-        
+
         commandBuffer.commit()
     }
     
@@ -465,9 +460,9 @@ final class DirectRenderer: NSObject {
             interpolatedFPS: interpolatedFPS,
             captureFPS: currentFPS,
             frameTime: Float(processingTime),
-            gpuTime: Float(processingTime * 0.8),
-            captureLatency: Float(processingTime * 0.1),
-            presentLatency: Float(processingTime * 0.1),
+            gpuTime: Float(gpuTime),
+            captureLatency: 0,
+            presentLatency: 0,
             frameCount: frameCount,
             interpolatedFrameCount: interpolatedFrameCount,
             droppedFrames: drops,
@@ -605,12 +600,11 @@ struct RingBuffer<T>: @unchecked Sendable {
     }
     
     // Conformance helpers
-    subscript(index: Int) -> T {
-        get {
-            lock.lock()
-            defer { lock.unlock() }
-            return array[(head + index) % capacity]!
-        }
+    subscript(index: Int) -> T? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard index >= 0, index < countInternal else { return nil }
+        return array[(head + index) % capacity]
     }
 }
 
