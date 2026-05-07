@@ -129,13 +129,13 @@ struct MGHUDView: View {
     
     private var timingSection: some View {
         let frameTimeText = String(format: "%.2f ms", data.frameTime)
-        let gpuTimeText = String(format: "%.2f ms", data.gpuTime)
-        let latencyText = String(format: "%.1f ms", data.captureLatency)
-        
+        let gpuTimeText = data.gpuTime > 0
+            ? String(format: "%.2f ms", data.gpuTime)
+            : "--"
+
         return VStack(spacing: isCompact ? 2 : 3) {
             HUDRow(label: "Frame Time", value: frameTimeText, compact: isCompact)
             HUDRow(label: "GPU Time", value: gpuTimeText, compact: isCompact)
-            HUDRow(label: "Latency", value: latencyText, compact: isCompact)
         }
     }
     
