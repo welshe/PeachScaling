@@ -49,6 +49,9 @@ struct ContentView: View {
 
     @State private var hudController = MGHUDWindowController()
 
+    @State private var showNewProfileAlert = false
+    @State private var newProfileName = ""
+
     private var macOSVersionString: String {
         let v = ProcessInfo.processInfo.operatingSystemVersion
         return "macOS \(v.majorVersion).\(v.minorVersion).\(v.patchVersion)"
@@ -100,6 +103,21 @@ struct ContentView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(alertMessage)
+        }
+        .alert("New Profile", isPresented: $showNewProfileAlert) {
+            TextField("Profile name", text: $newProfileName)
+            Button("Cancel", role: .cancel) {
+                newProfileName = ""
+            }
+            Button("Create") {
+                let name = newProfileName.trimmingCharacters(in: .whitespaces)
+                guard !name.isEmpty else { return }
+                settings.selectedProfile = name
+                settings.saveProfile(name)
+                newProfileName = ""
+            }
+        } message: {
+            Text("Save current settings as a new profile.")
         }
     }
 
@@ -186,8 +204,31 @@ struct ContentView: View {
                 }
 
                 HStack {
-                    Text("Profile: \"Default\"")
-                        .font(.largeTitle).bold()
+                    Picker("Profile", selection: $settings.selectedProfile) {
+                        ForEach(settings.profiles, id: \.self) { name in
+                            Text(name).tag(name)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 160)
+                    .onChange(of: settings.selectedProfile) { name in
+                        settings.loadProfile(name)
+                    }
+
+                    Button("Save") {
+                        settings.saveProfile(settings.selectedProfile)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Button {
+                        showNewProfileAlert = true
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
                     Spacer()
 
                     if isScalingActive {
@@ -269,7 +310,7 @@ struct ContentView: View {
                 ConfigPanel(title: "Anti-Aliasing") {
                     PickerRow(label: "Mode",
                               selection: $settings.aaMode,
-                              helpText: "• FXAA\n• SMAA\n• MSAA\n• TAA")
+                              helpText: "• FXAA: Fast Approximate\n• SMAA: Fast Edge Smoothing\n• TAA: Temporal Anti-Aliasing")
 
                     if settings.aaMode != .off {
                         Text(settings.aaMode.description)
